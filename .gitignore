@@ -1,0 +1,19 @@
+# --- Rác của Arduino IDE ---
+build/
+*.elf
+*.hex
+*.bin
+*.part
+*.map
+
+# --- Rác của PlatformIO / VS Code (Nếu team có người dùng) ---
+.pio/
+.vscode/
+*.code-workspace
+
+# --- Rác của Hệ điều hành ---
+.DS_Store
+.AppleDouble
+.LSOverride
+Thumbs.db
+ehthumbs.db

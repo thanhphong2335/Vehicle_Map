@@ -26,9 +26,15 @@ bool tjpg_output(int16_t x, int16_t y, uint16_t w, uint16_t h, uint16_t* bitmap)
 }
 
 // --- 4. INCLUDE DỮ LIỆU (Sau khi đã có struct VideoInfo) ---
-#include "video.h" // Chứa video01
-#include "image.h" // Chứa image01
-
+#include "video.h"   // Chứa video01
+#include "image.h"   // Chứa image01
+#include "video02.h" // Chứa video02
+#include "video03.h" // Chứa video03
+#include "video04.h"
+#include "video05.h"
+#include "video06.h"
+#include "video07.h"
+#include "video08.h"
 // --- 5. HÀM CHẠY CHUNG ---
 void playMedia(VideoInfo &data, int repeat, int pauseAfter) {
   for (int r = 0; r < repeat; r++) {
@@ -38,7 +44,7 @@ void playMedia(VideoInfo &data, int repeat, int pauseAfter) {
       uint16_t sz = pgm_read_word(&(data.frame_sizes[i]));
       TJpgDec.drawJpg(0, 0, ptr, sz);
       u8g2.sendBuffer();
-      if (data.num_frames > 1) delay(50); 
+      if (data.num_frames > 1) delay(50);
     }
   }
   if (pauseAfter > 0) delay(pauseAfter);
@@ -49,15 +55,17 @@ void setup() {
   Wire.setClock(400000);
   u8g2.begin();
   TJpgDec.setCallback(tjpg_output);
-  TJpgDec.setJpgScale(1); 
+  TJpgDec.setJpgScale(1);
 }
 
 void loop() {
-  // THỨ TỰ HIỂN THỊ CỦA PHONG:
-  // 1. Chạy Video 84 frame (biến video01 trong video.h)
   playMedia(image01, 1, 3000);
+  playMedia(video07, 5, 0);
+  playMedia(video08, 5, 0);
   playMedia(video01, 1, 0);
-  
-  // // 2. Hiện ảnh tĩnh 3 giây (biến image01 trong image.h)
-  
+  playMedia(video02, 1, 0); 
+  playMedia(video03, 1, 0);
+  playMedia(video04, 1, 0);
+  playMedia(video05, 1, 0);
+  playMedia(video06, 1, 0);
 }

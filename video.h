@@ -6741,7 +6741,4 @@ const uint16_t video01_frame_sizes[] PROGMEM = {
 
 const uint16_t video01_NUM_FRAMES = 84;
 
-// Đảm bảo struct này đã có trong code chính, nếu chưa thì dùng định nghĩa này
-
-
 VideoInfo video01 = { video01_frames, video01_frame_sizes, 84 };
