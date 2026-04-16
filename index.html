@@ -25,22 +25,22 @@
     const THING_NAME = "motomap-test-phong-2026"; 
 
     async function sendText() {
-      const text = document.getElementById('msgBox').value;
-      if (!text) { alert("Nhập chữ vào đã!"); return; }
-      
-      document.getElementById('status').innerText = "Đang bắn lên Cloud...";
-      
-      try {
-        await fetch(`https://dweet.io/dweet/for/${THING_NAME}`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ message: text }) // Đóng gói chữ vào biến "message"
-        });
-        document.getElementById('status').innerText = "✅ Đã gửi thành công chữ: " + text;
-      } catch (e) {
-        document.getElementById('status').innerText = "❌ Lỗi mạng rồi!";
-      }
-    }
+  const text = document.getElementById('msgBox').value;
+  if (!text) return;
+  
+  document.getElementById('status').innerText = "Đang bắn lên ThingSpeak...";
+  
+  // Link bắn dữ liệu lên ThingSpeak (Kênh test công cộng)
+  // Field1 sẽ chứa nội dung tin nhắn của Phong
+  const url = `https://api.thingspeak.com/update?api_key=4Z4U7K6A6T6Z9R9L&field1=${encodeURIComponent(text)}`;
+  
+  try {
+    await fetch(url, { mode: 'no-cors' }); // ThingSpeak chấp nhận chế độ này
+    document.getElementById('status').innerText = "✅ Đã gửi xong! Đợi 2s để ESP32 cập nhật.";
+  } catch (e) {
+    document.getElementById('status').innerText = "❌ Vẫn lỗi mạng! (Kiểm tra lại 4G)";
+  }
+}
   </script>
 </body>
 </html>
