@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Test Gửi Chữ ESP32</title>
+  <style>
+    body { font-family: sans-serif; background: #121212; color: #fff; padding: 20px; text-align: center; }
+    input { padding: 15px; font-size: 18px; width: 80%; border-radius: 8px; border: none; margin-bottom: 15px; }
+    button { padding: 15px 30px; font-size: 18px; background: #0a84ff; color: #fff; border: none; border-radius: 8px; cursor: pointer; }
+    #status { margin-top: 20px; font-size: 14px; color: #aaa; }
+  </style>
+</head>
+<body>
+  <h2>📡 Bảng Điều Khiển MotoMap</h2>
+  
+  <input type="text" id="msgBox" placeholder="Nhập chữ gì đó (vd: Hello Phong)">
+  <br>
+  <button onclick="sendText()">Gửi Lên Màn Hình OLED</button>
+  
+  <p id="status">Chưa gửi gì cả.</p>
+
+  <script>
+    // Tên trạm liên lạc (Cả Web và ESP32 phải dùng chung tên này)
+    const THING_NAME = "motomap-test-phong-2026"; 
+
+    async function sendText() {
+      const text = document.getElementById('msgBox').value;
+      if (!text) { alert("Nhập chữ vào đã!"); return; }
+      
+      document.getElementById('status').innerText = "Đang bắn lên Cloud...";
+      
+      try {
+        await fetch(`https://dweet.io/dweet/for/${THING_NAME}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ message: text }) // Đóng gói chữ vào biến "message"
+        });
+        document.getElementById('status').innerText = "✅ Đã gửi thành công chữ: " + text;
+      } catch (e) {
+        document.getElementById('status').innerText = "❌ Lỗi mạng rồi!";
+      }
+    }
+  </script>
+</body>
+</html>
