@@ -1,0 +1,161 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#0b1117">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="MotoMap">
+  <title>MotoMap</title>
+  <link rel="apple-touch-icon" sizes="180x180" href="apple-touch-icon.png">
+  <link rel="icon" type="image/png" href="apple-touch-icon.png">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <main class="app-shell">
+    <header class="app-header">
+      <div>
+        <p class="eyebrow">GPS độc lập · ESP32 navigation</p>
+        <h1>MotoMap</h1>
+      </div>
+      <span id="device-status" class="status-pill">Đang kiểm tra</span>
+    </header>
+
+    <section class="card">
+      <div class="card-heading">
+        <h2>iPhone Personal Hotspot</h2>
+        <button id="refresh-status" class="button button-small button-secondary" type="button">Làm mới</button>
+      </div>
+      <p id="connection-detail" class="muted">Đang liên lạc với ESP32…</p>
+      <a id="station-web-link" class="button button-secondary hidden" href="#">Mở web hotspot</a>
+      <form id="wifi-form" class="stack-form">
+        <label for="wifi-ssid">Tên iPhone / tên Wi‑Fi hotspot</label>
+        <input id="wifi-ssid" type="text" maxlength="32" autocomplete="off" placeholder="Ví dụ: iPhone của Phong">
+        <label for="wifi-password">Mật khẩu hotspot</label>
+        <input id="wifi-password" type="password" maxlength="63" autocomplete="new-password"
+               placeholder="Để trống nếu mật khẩu đã lưu">
+        <p class="muted form-note">Trên iPhone: bật Điểm truy cập cá nhân, Cho phép người khác kết nối và Tối đa hóa tương thích.</p>
+        <div class="button-row">
+          <button id="save-wifi" class="button button-primary" type="submit">Lưu và kết nối Wi-Fi</button>
+        </div>
+        <p id="wifi-message" class="message" role="status"></p>
+      </form>
+    </section>
+
+    <section class="card">
+      <div class="card-heading">
+        <h2>Chọn điểm đến</h2>
+        <span id="location-quality" class="tag">Chưa chọn</span>
+      </div>
+      <form id="search-form" class="stack-form">
+        <label for="address-input">Nhập địa chỉ</label>
+        <div class="input-row">
+          <input id="address-input" type="text" autocomplete="street-address"
+                 placeholder="Ví dụ: 1949 QL1A, TP. Hồ Chí Minh" required>
+          <button class="button button-primary" type="submit">Tìm</button>
+        </div>
+      </form>
+      <form id="coordinate-form" class="stack-form compact-form">
+        <label for="coordinate-input">Hoặc nhập tọa độ lat, lon</label>
+        <div class="input-row">
+          <input id="coordinate-input" type="text" inputmode="decimal" placeholder="10.8231, 106.6297">
+          <button class="button button-secondary" type="submit">Ghim</button>
+        </div>
+      </form>
+      <div class="vehicle-picker">
+        <label for="vehicle-select">Phương tiện</label>
+        <select id="vehicle-select" class="select-control">
+          <option value="motorcycle" selected>Xe máy</option>
+          <option value="car">Ô tô</option>
+        </select>
+        <p class="muted form-note">OSRM public đang dùng profile driving cho cả hai lựa chọn.</p>
+      </div>
+      <p id="search-message" class="message" role="status"></p>
+      <div id="search-results" class="search-results" aria-live="polite"></div>
+    </section>
+
+    <section class="card map-card">
+      <div class="card-heading">
+        <h2>Bản đồ OpenStreetMap</h2>
+        <span id="map-status" class="tag">Đang tải OSM…</span>
+      </div>
+      <div id="map" class="map"></div>
+      <div class="map-actions">
+        <button id="center-gps" class="button button-secondary" type="button">Xem GPS của ESP</button>
+        <button id="clear-destination" class="button button-ghost" type="button">Xóa ghim</button>
+      </div>
+      <p id="destination-detail" class="destination-detail">Chưa có điểm đến.</p>
+    </section>
+
+    <section class="card navigation-card">
+      <div class="card-heading">
+        <h2>Navigation độc lập</h2>
+        <span id="gps-status" class="tag">GPS chưa có fix</span>
+      </div>
+      <div class="navigation-summary">
+        <div><span class="metric-label">Trạng thái</span><strong id="route-state">IDLE</strong></div>
+        <div><span class="metric-label">Lần rẽ tới</span><strong id="instruction-distance">—</strong></div>
+        <div><span class="metric-label">Đường</span><strong id="instruction-road">—</strong></div>
+      </div>
+      <p id="route-detail" class="muted">ESP32 sẽ tự tính route sau khi có GPS và hotspot.</p>
+      <div class="button-row">
+        <button id="start-navigation" class="button button-primary" type="button" disabled>Xác nhận & bắt đầu</button>
+        <button id="reroute-navigation" class="button button-secondary" type="button">Tính lại</button>
+        <button id="stop-navigation" class="button button-danger" type="button">Dừng</button>
+      </div>
+      <p id="navigation-message" class="message" role="status"></p>
+    </section>
+
+    <section class="card media-card">
+      <div class="card-heading">
+        <h2 id="media-title">Ảnh / video 320×172</h2>
+        <span id="animation-status" class="tag">Chưa có animation</span>
+      </div>
+      <input id="media-input" class="file-input" type="file" accept="image/*,video/*">
+      <video id="video-preview" class="media-preview landscape-preview hidden" muted playsinline loop></video>
+      <img id="image-preview" class="media-preview landscape-preview hidden" alt="Ảnh đã chọn">
+      <div id="crop-editor" class="crop-editor hidden">
+        <div class="crop-editor-heading">
+          <strong>Chọn phần ảnh hiện trên màn</strong>
+          <span id="crop-info" class="muted"></span>
+        </div>
+        <div id="crop-stage" class="crop-stage" aria-label="Kéo ảnh để chọn vùng hiển thị">
+          <img id="crop-image" draggable="false" alt="Kéo ảnh để chọn vùng hiển thị">
+          <div class="crop-grid" aria-hidden="true"><i></i><i></i><b></b><b></b></div>
+        </div>
+        <div class="crop-controls">
+          <label for="crop-zoom">Phóng to</label>
+          <input id="crop-zoom" type="range" min="1" max="3" step="0.01" value="1">
+        </div>
+        <div class="crop-controls">
+          <label for="tft-tone">Màu TFT</label>
+          <input id="tft-tone" type="range" min="0" max="100" step="1" value="55">
+          <span id="tft-tone-info" class="muted">55%</span>
+          <button id="rotate-crop" class="button button-small button-secondary" type="button">Xoay 90°</button>
+          <button id="reset-crop" class="button button-small button-secondary" type="button">Căn giữa</button>
+        </div>
+        <p class="muted crop-note">Giữ và kéo ảnh trong khung để chọn phần cần hiển thị. “Màu TFT” làm vùng đen sâu hơn sau khi crop; giảm về 0% nếu muốn giữ màu canvas gốc.</p>
+      </div>
+      <canvas id="media-canvas" width="320" height="172" class="hidden"></canvas>
+      <div class="button-row">
+        <button id="show-test-image" class="button button-primary" type="button" disabled>Hi&#7875;n th&#7883; &#7843;nh test</button>
+        <button id="clear-test-image" class="button button-ghost" type="button" disabled>Tho&#225;t &#7843;nh test</button>
+        <button id="start-media" class="button button-secondary" type="button" disabled>Stream thử</button>
+        <button id="stop-media" class="button button-ghost" type="button" disabled>Dừng stream</button>
+        <button id="save-animation" class="button button-primary" type="button" disabled>Lưu Video vào ESP32</button>
+        <button id="delete-animation" class="button button-danger" type="button">Xóa animation</button>
+      </div>
+      <progress id="animation-progress" class="upload-progress hidden" value="0" max="60"></progress>
+      <p id="media-message" class="message" role="status"></p>
+    </section>
+
+    <footer class="app-footer">
+      <p>© OpenStreetMap contributors · tìm kiếm Nominatim · routing OSRM.</p>
+      <p>Sau khi xác nhận điểm đến, có thể đóng Safari và khóa màn hình iPhone.</p>
+    </footer>
+  </main>
+
+  <script src="app.js"></script>
+</body>
+</html>

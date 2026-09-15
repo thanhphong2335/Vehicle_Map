@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Raised cyberpunk accent layer for Tinkercad.
+  Import separately, position over motomap_front_base.svg, and set height
+  to 0.6-1.0 mm. Keep it as a separate color if using dual-color printing.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" width="190mm" height="110mm" viewBox="0 0 190 110">
+  <g fill="#00d8ff">
+    <!-- Lower left angular trace -->
+    <path d="M13 84 H48 L61 95 L57 99 L45 90 H13 Z"/>
+    <!-- Lower right angular trace -->
+    <path d="M177 84 H142 L129 95 L133 99 L145 90 H177 Z"/>
+
+    <!-- Upper left and right fins -->
+    <path d="M16 17 H47 L55 25 L49 29 L43 23 H16 Z"/>
+    <path d="M174 17 H143 L135 25 L141 29 L147 23 H174 Z"/>
+
+    <!-- Bezel tabs -->
+    <rect x="18" y="12" width="14" height="5" rx="1"/>
+    <rect x="158" y="12" width="14" height="5" rx="1"/>
+    <rect x="18" y="93" width="14" height="5" rx="1"/>
+    <rect x="158" y="93" width="14" height="5" rx="1"/>
+
+    <!-- Side tech bars -->
+    <path d="M12 69 L27 64 L28 67 L13 72 Z"/>
+    <path d="M12 75 L27 70 L28 73 L13 78 Z"/>
+    <path d="M12 81 L27 76 L28 79 L13 84 Z"/>
+    <path d="M178 69 L163 64 L162 67 L177 72 Z"/>
+    <path d="M178 75 L163 70 L162 73 L177 78 Z"/>
+    <path d="M178 81 L163 76 L162 79 L177 84 Z"/>
+  </g>
+</svg>

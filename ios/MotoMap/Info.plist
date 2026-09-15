@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>NSBluetoothAlwaysUsageDescription</key>
+	<string>MotoMap uses Bluetooth to send turn instructions to the ESP32 display.</string>
+	<key>NSBluetoothPeripheralUsageDescription</key>
+	<string>MotoMap uses Bluetooth to connect to the ESP32 display.</string>
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>MotoMap uses your location to calculate and update motorcycle navigation.</string>
+	<key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
+	<string>MotoMap uses your location during an active navigation session, including when the screen is locked.</string>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>MotoMap connects to the local MotoMap ESP32 Wi-Fi network to send media frames.</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>MotoMap lets you choose photos and videos to display on the ESP32.</string>
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>location</string>
+		<string>bluetooth-central</string>
+	</array>
+</dict>
+</plist>

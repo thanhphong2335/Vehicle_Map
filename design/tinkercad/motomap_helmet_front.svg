@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- MotoMap Helmet Shell: front silhouette for Tinkercad. 190 x 110 mm. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="190mm" height="110mm" viewBox="0 0 190 110">
+  <path fill="#2a2a2a" d="M16,104 C8,103 2,97 2,88 L2,43 C2,23 16,8 38,5 C74,0 123,0 153,7 C174,12 187,26 188,47 L188,86 C188,98 181,105 169,106 L16,104 Z"/>
+  <!-- import the separate screen hole as a Tinkercad hole -->
+</svg>

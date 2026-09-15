@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  MotoMap Tinkercad base profile.
+  Default outer size: 190 x 110 mm. Import as SVG in Tinkercad, set height
+  to your desired faceplate thickness, then use the window as a hole.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" width="190mm" height="110mm" viewBox="0 0 190 110">
+  <rect x="0" y="0" width="190" height="110" rx="15" ry="15" fill="#2b2b2b"/>
+</svg>

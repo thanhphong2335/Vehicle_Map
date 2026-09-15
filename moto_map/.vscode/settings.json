@@ -1,0 +1,4 @@
+{
+  "platformio-ide.useBuiltinPIOCore": true,
+  "platformio-ide.useBuiltinPython": true
+}
