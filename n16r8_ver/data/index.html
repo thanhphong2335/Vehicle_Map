@@ -107,6 +107,20 @@
       <p id="navigation-message" class="message" role="status"></p>
     </section>
 
+    <section class="card offline-map-card">
+      <div class="card-heading">
+        <h2>Bản đồ Offline (Lưu trước)</h2>
+        <span id="offline-map-stats" class="tag">0 tiles (0 KB)</span>
+      </div>
+      <p class="muted">Tải trước bản đồ dọc theo cung đường để khi đi vào vùng rừng núi mất sóng 4G/Internet, màn hình vẫn hiển thị dẫn đường đầy đủ.</p>
+      <div class="button-row">
+        <button id="download-route-map" class="button button-primary" type="button" disabled>Tải bản đồ lộ trình này</button>
+        <button id="delete-offline-map" class="button button-danger" type="button">Xóa bản đồ offline</button>
+      </div>
+      <progress id="offline-map-progress" class="upload-progress hidden" value="0" max="100"></progress>
+      <p id="offline-map-message" class="message" role="status"></p>
+    </section>
+
     <section class="card media-card">
       <div class="card-heading">
         <h2 id="media-title">Ảnh / video 320×172</h2>
@@ -146,7 +160,7 @@
         <button id="save-animation" class="button button-primary" type="button" disabled>Lưu Video vào ESP32</button>
         <button id="delete-animation" class="button button-danger" type="button">Xóa animation</button>
       </div>
-      <progress id="animation-progress" class="upload-progress hidden" value="0" max="60"></progress>
+      <progress id="animation-progress" class="upload-progress hidden" value="0" max="100"></progress>
       <p id="media-message" class="message" role="status"></p>
     </section>
 
@@ -156,6 +170,6 @@
     </footer>
   </main>
 
-  <script src="app.js"></script>
+  <script src="app.js?v=16fps"></script>
 </body>
 </html>

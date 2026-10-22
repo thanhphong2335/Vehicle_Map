@@ -1,6 +1,7 @@
 #pragma once
 
 #include <Arduino.h>
+#include <FS.h>
 #include <WebServer.h>
 
 class DisplayManager;
@@ -10,6 +11,8 @@ class ModeController;
 class RouteManager;
 class SettingsStore;
 
+class NavigationMapManager;
+
 class ConnectionManager {
 public:
     ConnectionManager(DisplayManager* display,
@@ -17,7 +20,8 @@ public:
                       ModeController* modeController,
                       GpsManager* gps,
                       RouteManager* route,
-                      SettingsStore* settings);
+                      SettingsStore* settings,
+                      NavigationMapManager* mapManager = nullptr);
 
     void begin();
     void loop();
@@ -38,6 +42,8 @@ private:
     GpsManager* _gps;
     RouteManager* _route;
     SettingsStore* _settings;
+    NavigationMapManager* _mapManager;
+    File _tileUploadFile;
     NetworkState _networkState = NetworkState::Connecting;
     String _stationSsid;
     String _stationPassword;
@@ -74,6 +80,9 @@ private:
     void handleAnimationFrameUpload();
     void handleAnimationCommit();
     void handleAnimationDelete();
+    void handleMapOfflineStats();
+    void handleMapOfflineDelete();
+    void handleMapTileUpload();
 
     void sendJson(const String& body, int status = 200);
     void sendError(const String& error, int status);

@@ -134,7 +134,14 @@ void NavigationMapManager::initPsramSprites() {
     _spritesInitialized = true;
 }
 
+String NavigationMapManager::tilePath(const TileKey& tile) {
+    char path[32];
+    snprintf(path, sizeof(path), "/tiles/%u_%ld_%ld.png", tile.zoom, static_cast<long>(tile.x), static_cast<long>(tile.y));
+    return String(path);
+}
+
 bool NavigationMapManager::getCachedTileSprite(const TileKey& tile, lgfx::LGFX_Sprite*& outSprite) {
+    // 1. Check in-memory PSRAM cache
     for (size_t i = 0; i < kPsramTileCacheSize; ++i) {
         if (_psramTileCache[i].valid && sameTile(_psramTileCache[i].key, tile)) {
             _psramTileCache[i].lastAccess = millis();
@@ -142,16 +149,129 @@ bool NavigationMapManager::getCachedTileSprite(const TileKey& tile, lgfx::LGFX_S
             return true;
         }
     }
+    // 2. Check offline LittleFS Flash cache
+    if (loadTileFromFlash(tile, outSprite)) {
+        return true;
+    }
+    return false;
+}
+
+bool NavigationMapManager::loadTileFromFlash(const TileKey& tile, lgfx::LGFX_Sprite*& outSprite) {
+    const String path = tilePath(tile);
+    if (!LittleFS.exists(path)) return false;
+
+    File f = LittleFS.open(path, "r");
+    if (!f) return false;
+    const size_t size = f.size();
+    if (size == 0 || size > kMaximumTileBytes) {
+        f.close();
+        return false;
+    }
+
+    if (_downloadBuffer == nullptr) {
+        _downloadBuffer = static_cast<uint8_t*>(malloc(kMaximumTileBytes));
+        if (_downloadBuffer == nullptr) {
+            f.close();
+            return false;
+        }
+    }
+
+    if (f.read(_downloadBuffer, size) != size) {
+        f.close();
+        return false;
+    }
+    f.close();
+
+    size_t lruIndex = 0;
+    uint32_t oldestTime = UINT32_MAX;
+    for (size_t i = 0; i < kPsramTileCacheSize; ++i) {
+        if (!_psramTileCache[i].valid) {
+            lruIndex = i;
+            break;
+        }
+        if (_psramTileCache[i].lastAccess < oldestTime) {
+            oldestTime = _psramTileCache[i].lastAccess;
+            lruIndex = i;
+        }
+    }
+
+    CachedTile& slot = _psramTileCache[lruIndex];
+    if (slot.sprite.drawPng(_downloadBuffer, size, 0, 0)) {
+        slot.key = tile;
+        slot.lastAccess = millis();
+        slot.valid = true;
+        outSprite = &slot.sprite;
+        return true;
+    }
     return false;
 }
 
 bool NavigationMapManager::isTileInCache(const TileKey& tile) const {
+    // 1. In PSRAM
     for (size_t i = 0; i < kPsramTileCacheSize; ++i) {
         if (_psramTileCache[i].valid && sameTile(_psramTileCache[i].key, tile)) {
             return true;
         }
     }
-    return false;
+    // 2. In Flash LittleFS
+    return LittleFS.exists(tilePath(tile));
+}
+
+bool NavigationMapManager::saveOfflineTile(const TileKey& tile, const uint8_t* data, size_t length) {
+    if (data == nullptr || length == 0 || length > kMaximumTileBytes) return false;
+    if (!LittleFS.exists("/tiles")) {
+        LittleFS.mkdir("/tiles");
+    }
+    const String path = tilePath(tile);
+    File f = LittleFS.open(path, "w");
+    if (!f) return false;
+    const bool ok = (f.write(data, length) == length);
+    f.close();
+
+    lgfx::LGFX_Sprite* unused = nullptr;
+    loadTileFromFlash(tile, unused);
+    _dirty = true;
+    return ok;
+}
+
+bool NavigationMapManager::deleteOfflineTiles() {
+    File root = LittleFS.open("/tiles");
+    if (!root || !root.isDirectory()) {
+        if (root) root.close();
+        return true;
+    }
+    std::vector<String> paths;
+    File file = root.openNextFile();
+    while (file) {
+        String name = file.name();
+        file.close();
+        paths.push_back(name.startsWith("/") ? name : ("/tiles/" + name));
+        file = root.openNextFile();
+    }
+    root.close();
+
+    for (const auto& path : paths) {
+        LittleFS.remove(path);
+    }
+    return true;
+}
+
+void NavigationMapManager::getOfflineTileStats(size_t& count, size_t& totalBytes) {
+    count = 0;
+    totalBytes = 0;
+    File root = LittleFS.open("/tiles");
+    if (!root || !root.isDirectory()) {
+        if (root) root.close();
+        return;
+    }
+    File file = root.openNextFile();
+    while (file) {
+        ++count;
+        totalBytes += file.size();
+        file.close();
+        file = root.openNextFile();
+    }
+    root.close();
 }
 
 void NavigationMapManager::begin() {
@@ -822,6 +942,7 @@ void NavigationMapManager::processDownloadResult() {
                           static_cast<long>(tile.x),
                           static_cast<long>(tile.y),
                           static_cast<unsigned>(size));
+            saveOfflineTile(tile, _downloadBuffer, size);
         } else {
             Serial.printf("[MAP] Decode PNG failed in PSRAM for tile: z%u/%ld/%ld\n",
                           tile.zoom, static_cast<long>(tile.x), static_cast<long>(tile.y));

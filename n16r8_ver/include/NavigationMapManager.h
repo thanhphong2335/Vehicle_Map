@@ -26,7 +26,6 @@ public:
     bool showingMap() const;
     const String& lastError() const;
 
-private:
     struct TileKey {
         int32_t x = 0;
         int32_t y = 0;
@@ -37,6 +36,11 @@ private:
             : x(tileX), y(tileY), zoom(tileZoom) {}
     };
 
+    bool saveOfflineTile(const TileKey& tile, const uint8_t* data, size_t length);
+    static bool deleteOfflineTiles();
+    static void getOfflineTileStats(size_t& count, size_t& totalBytes);
+
+private:
     struct CachedTile {
         TileKey key;
         lgfx::LGFX_Sprite sprite;
@@ -99,7 +103,9 @@ private:
 
     void initPsramSprites();
     bool getCachedTileSprite(const TileKey& tile, lgfx::LGFX_Sprite*& outSprite);
+    bool loadTileFromFlash(const TileKey& tile, lgfx::LGFX_Sprite*& outSprite);
     bool isTileInCache(const TileKey& tile) const;
+    static String tilePath(const TileKey& tile);
 
     bool collectVisibleTiles(TileKey* tiles,
                              uint8_t& count,

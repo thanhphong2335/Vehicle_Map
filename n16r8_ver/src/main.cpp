@@ -29,7 +29,11 @@ ConnectionManager connectionManager(
     &modeController,
     &gpsManager,
     &routeManager,
-    &settingsStore);
+    &settingsStore
+#if defined(MOTOMAP_NAV_MAP)
+    , &navigationMapManager
+#endif
+);
 
 void onNavigationUpdate(const NavigationData& data) {
 #if defined(MOTOMAP_NAV_MAP)

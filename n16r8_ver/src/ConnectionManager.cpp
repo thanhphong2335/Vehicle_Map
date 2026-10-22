@@ -11,6 +11,9 @@
 #include "ModeController.h"
 #include "RouteManager.h"
 #include "SettingsStore.h"
+#if defined(MOTOMAP_NAV_MAP)
+#include "NavigationMapManager.h"
+#endif
 
 namespace {
 constexpr char kApSsid[] = "MotoMap-ESP32";
@@ -38,13 +41,15 @@ ConnectionManager::ConnectionManager(DisplayManager* display,
                                      ModeController* modeController,
                                      GpsManager* gps,
                                      RouteManager* route,
-                                     SettingsStore* settings)
+                                     SettingsStore* settings,
+                                     NavigationMapManager* mapManager)
     : _display(display),
       _media(media),
       _modeController(modeController),
       _gps(gps),
       _route(route),
-      _settings(settings) {}
+      _settings(settings),
+      _mapManager(mapManager) {}
 
 void ConnectionManager::begin() {
     if (!LittleFS.begin(true)) {
@@ -281,6 +286,17 @@ void ConnectionManager::configureRoutes() {
         [this]() { handleAnimationFrameUpload(); });
     _server.on("/api/media/animation/commit", HTTP_POST, [this]() { handleAnimationCommit(); });
     _server.on("/api/media/animation", HTTP_DELETE, [this]() { handleAnimationDelete(); });
+
+    _server.on("/api/map/offline/stats", HTTP_GET, [this]() { handleMapOfflineStats(); });
+    _server.on("/api/map/offline", HTTP_DELETE, [this]() { handleMapOfflineDelete(); });
+    _server.on(
+        "/api/map/tile",
+        HTTP_POST,
+        [this]() {
+            if (_uploadRequestOk) sendJson("{\"ok\":true}");
+            else sendError(_uploadRequestError.length() ? _uploadRequestError : "tile_upload_failed", 400);
+        },
+        [this]() { handleMapTileUpload(); });
 
     _server.onNotFound([this]() {
         if (_server.method() == HTTP_OPTIONS) {
@@ -608,7 +624,9 @@ bool ConnectionManager::serveFile(const char* path, const char* contentType) {
         sendError("file_open_failed", 500);
         return false;
     }
-    _server.sendHeader("Cache-Control", "no-store");
+    _server.sendHeader("Cache-Control", "no-cache, no-store, must-revalidate");
+    _server.sendHeader("Pragma", "no-cache");
+    _server.sendHeader("Expires", "0");
     _server.streamFile(file, contentType);
     file.close();
     return true;
@@ -618,3 +636,86 @@ void ConnectionManager::loop() {
     _server.handleClient();
     updateNetwork();
 }
+
+void ConnectionManager::handleMapOfflineStats() {
+    size_t count = 0;
+    size_t totalBytes = 0;
+#if defined(MOTOMAP_NAV_MAP)
+    NavigationMapManager::getOfflineTileStats(count, totalBytes);
+#endif
+    JsonDocument doc;
+    doc["ok"] = true;
+    doc["tiles_count"] = count;
+    doc["total_bytes"] = totalBytes;
+    doc["total_kb"] = totalBytes / 1024;
+    doc["littlefs_total"] = LittleFS.totalBytes();
+    doc["littlefs_used"] = LittleFS.usedBytes();
+    doc["littlefs_free"] = LittleFS.totalBytes() - LittleFS.usedBytes();
+    String body;
+    serializeJson(doc, body);
+    sendJson(body);
+}
+
+void ConnectionManager::handleMapOfflineDelete() {
+#if defined(MOTOMAP_NAV_MAP)
+    NavigationMapManager::deleteOfflineTiles();
+#endif
+    sendJson("{\"ok\":true,\"message\":\"offline_tiles_cleared\"}");
+}
+
+void ConnectionManager::handleMapTileUpload() {
+    HTTPUpload& upload = _server.upload();
+    if (upload.status == UPLOAD_FILE_START) {
+        _uploadRequestOk = true;
+        _uploadRequestError = "";
+        const uint8_t z = static_cast<uint8_t>(_server.arg("z").toInt());
+        const int32_t x = static_cast<int32_t>(_server.arg("x").toInt());
+        const int32_t y = static_cast<int32_t>(_server.arg("y").toInt());
+
+        if (z == 0 || !_server.hasArg("z") || !_server.hasArg("x") || !_server.hasArg("y")) {
+            _uploadRequestOk = false;
+            _uploadRequestError = "missing_tile_coordinates";
+            return;
+        }
+
+        if (!LittleFS.exists("/tiles")) {
+            LittleFS.mkdir("/tiles");
+        }
+
+        char path[32];
+        snprintf(path, sizeof(path), "/tiles/%u_%ld_%ld.png", z, static_cast<long>(x), static_cast<long>(y));
+        if (_tileUploadFile) _tileUploadFile.close();
+        _tileUploadFile = LittleFS.open(path, "w");
+        if (!_tileUploadFile) {
+            _uploadRequestOk = false;
+            _uploadRequestError = "tile_open_failed";
+        }
+        return;
+    }
+
+    if (upload.status == UPLOAD_FILE_WRITE) {
+        if (_uploadRequestOk && _tileUploadFile) {
+            if (_tileUploadFile.write(upload.buf, upload.currentSize) != upload.currentSize) {
+                _uploadRequestOk = false;
+                _uploadRequestError = "tile_write_failed";
+            }
+        }
+        return;
+    }
+
+    if (upload.status == UPLOAD_FILE_END) {
+        if (_tileUploadFile) {
+            _tileUploadFile.close();
+        }
+        return;
+    }
+
+    if (upload.status == UPLOAD_FILE_ABORTED) {
+        _uploadRequestOk = false;
+        _uploadRequestError = "tile_upload_aborted";
+        if (_tileUploadFile) {
+            _tileUploadFile.close();
+        }
+    }
+}
+

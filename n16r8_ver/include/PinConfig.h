@@ -12,31 +12,31 @@
 namespace PinConfig {
 
 #ifndef PIN_ST7789_SCLK
-#define PIN_ST7789_SCLK 12
+#define PIN_ST7789_SCLK 13  // SCL
 #endif
 
 #ifndef PIN_ST7789_MOSI
-#define PIN_ST7789_MOSI 11
+#define PIN_ST7789_MOSI 12  // SDA
+#endif
+
+#ifndef PIN_ST7789_RST
+#define PIN_ST7789_RST 11   // RST
+#endif
+
+#ifndef PIN_ST7789_DC
+#define PIN_ST7789_DC 10    // DC
+#endif
+
+#ifndef PIN_ST7789_CS
+#define PIN_ST7789_CS 9     // CS
 #endif
 
 #ifndef PIN_ST7789_MISO
 #define PIN_ST7789_MISO -1
 #endif
 
-#ifndef PIN_ST7789_DC
-#define PIN_ST7789_DC 9
-#endif
-
-#ifndef PIN_ST7789_CS
-#define PIN_ST7789_CS 10
-#endif
-
-#ifndef PIN_ST7789_RST
-#define PIN_ST7789_RST 8
-#endif
-
 #ifndef PIN_ST7789_BL
-#define PIN_ST7789_BL 7
+#define PIN_ST7789_BL -1   // Đèn nền đấu sẵn VCC (không dùng)
 #endif
 
 #ifndef PIN_GPS_RX

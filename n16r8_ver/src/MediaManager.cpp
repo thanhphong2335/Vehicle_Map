@@ -44,37 +44,48 @@ void MediaManager::loop(bool navigationActive) {
         // Navigation always has priority over a manually uploaded test image.
         _testImageActive = false;
         _wasNavigationActive = true;
+        _playbackStartMs = 0;
+        _lastRenderedFrame = 0xFFFF;
         return;
     }
     if (_testImageActive) return;
     if (static_cast<int32_t>(millis() - _externalStreamUntilMs) < 0) return;
-    if (!_animationValid || _display == nullptr) return;
+    if (!_animationValid || _display == nullptr || _animationFrames == 0 || _animationFps == 0) return;
 
-    if (_wasNavigationActive) {
-        _wasNavigationActive = false;
-        _nextFrameAtMs = 0;
-    }
     const uint32_t now = millis();
-    if (_nextFrameAtMs != 0 && static_cast<int32_t>(now - _nextFrameAtMs) < 0) return;
+    if (_wasNavigationActive || _playbackStartMs == 0 || now < _playbackStartMs) {
+        _wasNavigationActive = false;
+        _playbackStartMs = now;
+        _lastRenderedFrame = 0xFFFF;
+    }
 
-    if (_ramCacheActive && _cachedFrames[_playbackIndex].data != nullptr) {
-        _display->drawJpeg(_cachedFrames[_playbackIndex].data, _cachedFrames[_playbackIndex].length);
+    const uint32_t totalDurationMs = (_animationFrames * 1000UL) / _animationFps;
+    if (totalDurationMs == 0) return;
+
+    // Calculate target frame dynamically based on real-world elapsed time.
+    // This guarantees the video finishes in EXACTLY its original duration (e.g. 2s = 2.0s).
+    const uint32_t elapsedMs = now - _playbackStartMs;
+    const uint32_t loopTimeMs = elapsedMs % totalDurationMs;
+    uint16_t targetIndex = (loopTimeMs * _animationFps) / 1000UL;
+    if (targetIndex >= _animationFrames) {
+        targetIndex = _animationFrames - 1;
+    }
+
+    // Only render when time advances to a new frame
+    if (targetIndex == _lastRenderedFrame) {
+        return;
+    }
+
+    if (_ramCacheActive && _cachedFrames[targetIndex].data != nullptr) {
+        _display->drawJpeg(_cachedFrames[targetIndex].data, _cachedFrames[targetIndex].length);
     } else {
-        if (!_display->drawJpegFile(framePath(_playbackIndex))) {
-            Serial.printf("Failed to draw animation frame %u\n", _playbackIndex);
+        if (!_display->drawJpegFile(framePath(targetIndex))) {
+            Serial.printf("Failed to draw animation frame %u\n", targetIndex);
         }
     }
-    _playbackIndex = (_playbackIndex + 1) % _animationFrames;
 
-    const uint32_t interval = 1000UL / _animationFps;
-    if (_nextFrameAtMs == 0) {
-        _nextFrameAtMs = now + interval;
-    } else {
-        _nextFrameAtMs += interval;
-        if (static_cast<int32_t>(now - _nextFrameAtMs) > static_cast<int32_t>(interval)) {
-            _nextFrameAtMs = now + interval;
-        }
-    }
+    _lastRenderedFrame = targetIndex;
+    _playbackIndex = targetIndex;
 }
 
 bool MediaManager::handleJpeg(const uint8_t* data, size_t length) {
@@ -155,28 +166,49 @@ String MediaManager::framePath(uint16_t index) const {
 
 bool MediaManager::removeAnimationFiles(String* error) {
     if (_uploadFile) _uploadFile.close();
-    bool ok = true;
-    for (uint16_t index = 0; index < kMaximumFrames; ++index) {
-        const String path = framePath(index);
-        if (LittleFS.exists(path) && !LittleFS.remove(path)) ok = false;
+
+    // Directly remove files by index.
+    // NEVER use openNextFile() while deleting in LittleFS as it corrupts the internal directory
+    // iterator and causes an infinite loop / 10-minute hang!
+    uint16_t count = _animationFrames;
+    if (count == 0 && LittleFS.exists(kAnimationManifest)) {
+        File manifest = LittleFS.open(kAnimationManifest, "r");
+        if (manifest) {
+            JsonDocument doc;
+            if (!deserializeJson(doc, manifest)) {
+                count = doc["frames"] | 0;
+            }
+            manifest.close();
+        }
     }
-    if (LittleFS.exists(kAnimationManifest) && !LittleFS.remove(kAnimationManifest)) ok = false;
-    if (!ok && error != nullptr) *error = "animation_delete_failed";
-    return ok;
+    if (count == 0 || count > kMaximumFrames) {
+        count = kMaximumFrames;
+    }
+
+    for (uint16_t i = 0; i < count; ++i) {
+        LittleFS.remove(framePath(i));
+    }
+    if (LittleFS.exists(kAnimationManifest)) {
+        LittleFS.remove(kAnimationManifest);
+    }
+    return true;
 }
 
 bool MediaManager::clearAnimation(String* error) {
     clearRamCache();
+    removeAnimationFiles(error);
     _animationValid = false;
     _animationFrames = 0;
     _animationFps = 0;
     _animationTotalBytes = 0;
     _playbackIndex = 0;
+    _playbackStartMs = 0;
+    _lastRenderedFrame = 0xFFFF;
     _nextFrameAtMs = 0;
     _uploadId = "";
     memset(_uploadMask, 0, sizeof(_uploadMask));
     _uploadTotalBytes = 0;
-    return removeAnimationFiles(error);
+    return true;
 }
 
 bool MediaManager::beginAnimationUpload(uint16_t frameCount,
@@ -357,6 +389,8 @@ bool MediaManager::reloadAnimation(String* error) {
     _animationTotalBytes = totalBytes;
     _animationValid = true;
     _playbackIndex = 0;
+    _playbackStartMs = 0;
+    _lastRenderedFrame = 0xFFFF;
     _nextFrameAtMs = 0;
     Serial.printf("Animation ready: %u frames @ %u fps, %lu bytes\n",
                   _animationFrames,

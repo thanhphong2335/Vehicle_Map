@@ -34,7 +34,9 @@
     mediaCanvas: $("media-canvas"), mediaTitle: $("media-title"), showTestImage: $("show-test-image"), clearTestImage: $("clear-test-image"),
     startMedia: $("start-media"), stopMedia: $("stop-media"),
     saveAnimation: $("save-animation"), deleteAnimation: $("delete-animation"),
-    animationProgress: $("animation-progress"), animationStatus: $("animation-status"), mediaMessage: $("media-message")
+    animationProgress: $("animation-progress"), animationStatus: $("animation-status"), mediaMessage: $("media-message"),
+    downloadRouteMap: $("download-route-map"), deleteOfflineMap: $("delete-offline-map"),
+    offlineMapProgress: $("offline-map-progress"), offlineMapMessage: $("offline-map-message"), offlineMapStats: $("offline-map-stats")
   };
 
   const state = {
@@ -208,10 +210,12 @@
     if (!state.destination) {
       els.destinationDetail.textContent = "Chưa có điểm đến.";
       els.startNavigation.disabled = true;
+      if (els.downloadRouteMap) els.downloadRouteMap.disabled = true;
       return;
     }
     els.destinationDetail.textContent = `${state.destination.label} · ${state.destination.lat.toFixed(6)}, ${state.destination.lon.toFixed(6)}`;
     els.startNavigation.disabled = false;
+    if (els.downloadRouteMap) els.downloadRouteMap.disabled = false;
   }
 
   async function searchAddress(address) {
@@ -478,6 +482,8 @@
   }
 
   function drawMediaSource(source, width, height) {
+    const srcW = width || source.videoWidth || source.naturalWidth || state.displayWidth;
+    const srcH = height || source.videoHeight || source.naturalHeight || state.displayHeight;
     const canvas = els.mediaCanvas;
     const context = canvas.getContext("2d", { alpha: false });
     canvas.width = state.displayWidth;
@@ -485,15 +491,15 @@
     context.fillStyle = "#000";
     context.fillRect(0, 0, canvas.width, canvas.height);
 
-    const scale = Math.max(canvas.width / width, canvas.height / height);
-    const drawWidth = Math.round(width * scale);
-    const drawHeight = Math.round(height * scale);
+    const scale = Math.max(canvas.width / srcW, canvas.height / srcH);
+    const drawWidth = Math.round(srcW * scale);
+    const drawHeight = Math.round(srcH * scale);
     const drawX = Math.round((canvas.width - drawWidth) / 2);
     const drawY = Math.round((canvas.height - drawHeight) / 2);
 
     context.imageSmoothingEnabled = true;
     context.imageSmoothingQuality = "high";
-    context.drawImage(source, 0, 0, width, height, drawX, drawY, drawWidth, drawHeight);
+    context.drawImage(source, 0, 0, srcW, srcH, drawX, drawY, drawWidth, drawHeight);
 
     applySharpen(context, 0.40);
     applyTftTone(context);
@@ -784,7 +790,7 @@
   });
 
   async function sendMediaFrame() {
-    if (!state.mediaFile || state.frameInFlight || state.animationUploading) return;
+    if (!state.mediaActive || !state.mediaFile || state.frameInFlight || state.animationUploading) return;
     state.frameInFlight = true;
     try {
       if (!els.videoPreview.videoWidth) return;
@@ -797,18 +803,26 @@
     finally { state.frameInFlight = false; }
   }
 
+  function isVideoFile(file) {
+    if (!file) return false;
+    if (file.type && file.type.startsWith("video/")) return true;
+    const name = (file.name || "").toLowerCase();
+    return /\.(mp4|m4v|mov|webm|mkv|avi|3gp|ts)$/i.test(name);
+  }
+
   els.mediaInput.addEventListener("change", () => {
     const file = els.mediaInput.files?.[0];
     if (!file) return;
     if (state.mediaObjectUrl) URL.revokeObjectURL(state.mediaObjectUrl);
     state.mediaFile = file;
     state.mediaObjectUrl = URL.createObjectURL(file);
-    const image = file.type.startsWith("image/");
+    const isVideo = isVideoFile(file);
+    const isImage = !isVideo;
     els.imagePreview.classList.add("hidden");
-    els.videoPreview.classList.toggle("hidden", image);
-    els.cropEditor.classList.toggle("hidden", !image);
-    state.crop.active = image;
-    if (image) {
+    els.videoPreview.classList.toggle("hidden", isImage);
+    els.cropEditor.classList.toggle("hidden", !isImage);
+    state.crop.active = isImage;
+    if (isImage) {
       state.crop.rotation = 0;
       state.crop.tftTone = DEFAULT_TFT_TONE;
       els.tftTone.value = String(DEFAULT_TFT_TONE);
@@ -820,8 +834,8 @@
       els.videoPreview.src = state.mediaObjectUrl;
       els.showTestImage.disabled = true;
     }
-    els.startMedia.disabled = image;
-    els.saveAnimation.disabled = image;
+    els.startMedia.disabled = isImage;
+    els.saveAnimation.disabled = isImage;
     setMessage(els.mediaMessage, `${file.name} đã sẵn sàng.`);
   });
 
@@ -835,17 +849,14 @@
   });
 
   els.startMedia.addEventListener("click", async () => {
-    if (!state.mediaFile?.type.startsWith("video/")) return;
+    if (!isVideoFile(state.mediaFile)) return;
     try {
       await postJson("/mode/media", {});
       state.mediaActive = true;
       els.startMedia.disabled = true;
       els.stopMedia.disabled = false;
-      if (state.mediaFile.type.startsWith("image/")) await sendMediaFrame();
-      else {
-        await els.videoPreview.play();
-        state.mediaTimer = window.setInterval(sendMediaFrame, 125);
-      }
+      await els.videoPreview.play();
+      state.mediaTimer = window.setInterval(sendMediaFrame, 125);
     } catch (error) { setMessage(els.mediaMessage, error.message, "error"); }
   });
 
@@ -860,61 +871,105 @@
   });
 
   function waitForVideoMetadata(video) {
-    if (video.readyState >= 1 && Number.isFinite(video.duration)) return Promise.resolve();
+    if (video.readyState >= 1 && Number.isFinite(video.duration) && video.duration > 0) {
+      return Promise.resolve();
+    }
     return new Promise((resolve, reject) => {
-      video.addEventListener("loadedmetadata", resolve, { once: true });
-      video.addEventListener("error", () => reject(new Error("Không đọc được video")), { once: true });
+      const onDone = () => { cleanup(); resolve(); };
+      const onError = () => { cleanup(); reject(new Error("Không đọc được metadata video")); };
+      const timeout = setTimeout(() => { cleanup(); resolve(); }, 3500);
+      function cleanup() {
+        clearTimeout(timeout);
+        video.removeEventListener("loadedmetadata", onDone);
+        video.removeEventListener("canplay", onDone);
+        video.removeEventListener("error", onError);
+      }
+      video.addEventListener("loadedmetadata", onDone, { once: true });
+      video.addEventListener("canplay", onDone, { once: true });
+      video.addEventListener("error", onError, { once: true });
     });
   }
 
   function seekVideo(video, time) {
     return new Promise((resolve) => {
-      if (Math.abs(video.currentTime - time) < 0.04 && video.readyState >= 2) {
-        resolve();
-        return;
-      }
       let settled = false;
-      const done = () => {
+      const finish = () => {
         if (settled) return;
         settled = true;
-        window.clearTimeout(timeout);
-        video.removeEventListener("seeked", done);
-        video.removeEventListener("timeupdate", done);
-        resolve();
+        clearTimeout(timer);
+        video.removeEventListener("seeked", onSeeked);
+        requestAnimationFrame(() => setTimeout(resolve, 20));
       };
-      const timeout = window.setTimeout(done, 1200);
-      video.addEventListener("seeked", done, { once: true });
-      video.addEventListener("timeupdate", done, { once: true });
+
+      const timer = setTimeout(finish, 600);
+      const onSeeked = () => finish();
+
+      video.addEventListener("seeked", onSeeked, { once: true });
       try {
-        video.currentTime = time;
+        video.currentTime = Math.min(time, Math.max(0, (video.duration || 1) - 0.03));
       } catch (_) {
-        done();
+        finish();
       }
     });
   }
 
   els.saveAnimation.addEventListener("click", async () => {
-    if (!state.mediaFile?.type.startsWith("video/") || state.animationUploading) return;
+    if (!state.mediaFile) {
+      setMessage(els.mediaMessage, "Vui lòng chọn file video trước.", "warning");
+      return;
+    }
+    if (state.animationUploading) return;
+    if (!isVideoFile(state.mediaFile)) {
+      setMessage(els.mediaMessage, "File đã chọn không phải video (.mp4, .mov, .webm...).", "error");
+      return;
+    }
+
+    setMessage(els.mediaMessage, "Đang chuẩn bị lưu video…");
+
+    // Tắt ngay chế độ stream live nếu đang chạy để không làm nghẽn WebServer ESP32
+    state.mediaActive = false;
+    if (state.mediaTimer !== null) {
+      window.clearInterval(state.mediaTimer);
+      state.mediaTimer = null;
+    }
+    els.startMedia.disabled = true;
+    els.stopMedia.disabled = true;
+
     state.animationUploading = true;
     els.saveAnimation.disabled = true;
     els.animationProgress.classList.remove("hidden");
+    els.animationProgress.max = 100;
     els.animationProgress.value = 0;
-    els.videoPreview.pause();
+
+    // Đợi frame stream đang dở kết thúc hoàn toàn
+    while (state.frameInFlight) {
+      await new Promise(resolve => setTimeout(resolve, 50));
+    }
+    await new Promise(resolve => setTimeout(resolve, 200));
+
     try {
       await waitForVideoMetadata(els.videoPreview);
-      const duration = Math.min(10.0, Math.max(0.1, Number(els.videoPreview.duration)));
-      // Tốc độ 24 FPS mượt mà như video xem trên điện thoại (tối đa 240 frames cho 10s video)
-      const fps = 24;
-      const totalFrames = Math.min(240, Math.max(24, Math.round(duration * fps)));
+      els.videoPreview.muted = true;
+      els.videoPreview.play().then(() => els.videoPreview.pause()).catch(() => {});
 
-      // Ngân sách PSRAM cho animation: 3.5 MB (~14.5 KB/frame ở 240 frames)
+      const duration = Math.min(10.0, Math.max(0.2, Number(els.videoPreview.duration) || 1.0));
+      // Tốc độ 16 FPS chuẩn xác theo thời gian thực (đảm bảo ESP32-S3 giải mã mượt mà 1.0x, không bị chậm thành 4s)
+      const fps = 16;
+      const totalFrames = Math.min(160, Math.max(2, Math.round(duration * fps)));
+
+      // Ngân sách PSRAM cho animation: 3.5 MB (~22 KB/frame ở 160 frames)
       const targetRamBudget = 3500000;
-      const maxFrameBytes = Math.min(MAX_FRAME_BYTES, Math.max(10000, Math.floor(targetRamBudget / totalFrames)));
+      const maxFrameBytes = Math.min(MAX_FRAME_BYTES, Math.max(12000, Math.floor(targetRamBudget / totalFrames)));
 
+      setMessage(els.mediaMessage, `Đang khởi tạo ${totalFrames} frames (${fps} fps, thời lượng ${duration.toFixed(1)}s)…`);
       const begin = await postJson("/api/media/animation/begin", { frames: totalFrames, fps: fps });
       const uploadId = begin.upload_id;
+
       for (let index = 0; index < totalFrames; index += 1) {
-        const frameTime = (index / (totalFrames - 1)) * Math.max(0, duration - 0.03);
+        setMessage(els.mediaMessage, `Đang lưu frame ${index + 1}/${totalFrames}…`);
+        const frameTime = totalFrames > 1
+          ? (index / (totalFrames - 1)) * Math.max(0, duration - 0.03)
+          : 0;
         await seekVideo(els.videoPreview, frameTime);
         drawMediaSource(els.videoPreview, els.videoPreview.videoWidth, els.videoPreview.videoHeight);
         const blob = await compressedFrameBlob(maxFrameBytes);
@@ -922,17 +977,24 @@
         form.append("frame", blob, `f${String(index).padStart(3, "0")}.jpg`);
         await api(`/api/media/animation/frame?upload_id=${encodeURIComponent(uploadId)}&index=${index}`, { method: "POST", body: form });
         els.animationProgress.value = Math.round(((index + 1) / totalFrames) * 100);
-        setMessage(els.mediaMessage, `Đang lưu frame ${index + 1}/${totalFrames} (chất lượng cao)…`);
+        setMessage(els.mediaMessage, `Đã lưu frame ${index + 1}/${totalFrames} (${Math.round((blob.size / 1024) * 10) / 10} KB)…`);
       }
+
       await postJson("/api/media/animation/commit", { upload_id: uploadId });
-      setMessage(els.mediaMessage, `Đã lưu animation (${totalFrames} frames @ ${fps} fps). Đang nạp RAM và phát siêu mượt & sắc nét.`, "success");
+      els.animationProgress.value = 100;
+      setMessage(els.mediaMessage, `Đã lưu animation (${totalFrames} frames @ ${fps} fps). Đang phát trên màn hình!`, "success");
+
+      // Cưỡng chế ESP32 chuyển sang Media mode ngay
+      try {
+        await postJson("/mode/media", {});
+      } catch (_) {}
       await refreshStatus();
     } catch (error) {
       setMessage(els.mediaMessage, `Không lưu được animation: ${error.message}`, "error");
     } finally {
       state.animationUploading = false;
-      els.saveAnimation.disabled = !state.mediaFile?.type.startsWith("video/");
-      window.setTimeout(() => els.animationProgress.classList.add("hidden"), 1200);
+      els.saveAnimation.disabled = !isVideoFile(state.mediaFile);
+      window.setTimeout(() => els.animationProgress.classList.add("hidden"), 1500);
     }
   });
 
@@ -944,10 +1006,113 @@
     } catch (error) { setMessage(els.mediaMessage, error.message, "error"); }
   });
 
+  async function refreshOfflineMapStats() {
+    try {
+      const stats = await api("/api/map/offline/stats");
+      if (els.offlineMapStats) {
+        els.offlineMapStats.textContent = `${stats.tiles_count || 0} tiles (${stats.total_kb || 0} KB)`;
+      }
+    } catch (_) {}
+  }
+
+  function lon2tile(lon, zoom) {
+    return Math.floor((lon + 180) / 360 * Math.pow(2, zoom));
+  }
+  function lat2tile(lat, zoom) {
+    return Math.floor((1 - Math.log(Math.tan(lat * Math.PI / 180) + 1 / Math.cos(lat * Math.PI / 180)) / Math.PI) / 2 * Math.pow(2, zoom));
+  }
+
+  els.downloadRouteMap.addEventListener("click", async () => {
+    if (!state.destination) {
+      setMessage(els.offlineMapMessage, "Hãy chọn điểm đến trước.", "warning");
+      return;
+    }
+    const originLat = state.gps?.valid ? state.gps.lat : (map ? map.getCenter().lat : state.destination.lat);
+    const originLon = state.gps?.valid ? state.gps.lon : (map ? map.getCenter().lng : state.destination.lon);
+    const destLat = state.destination.lat;
+    const destLon = state.destination.lon;
+
+    els.downloadRouteMap.disabled = true;
+    els.offlineMapProgress.classList.remove("hidden");
+    els.offlineMapProgress.max = 100;
+    els.offlineMapProgress.value = 0;
+    setMessage(els.offlineMapMessage, "Đang tính toán các ô bản đồ trên lộ trình…");
+
+    try {
+      // 1. Fetch route geometry from OSRM
+      const osrmUrl = `https://router.project-osrm.org/route/v1/driving/${originLon},${originLat};${destLon},${destLat}?overview=full&geometries=geojson`;
+      const routeRes = await fetch(osrmUrl);
+      if (!routeRes.ok) throw new Error("Không lấy được đường đi từ OSRM");
+      const routeData = await routeRes.json();
+      const coords = routeData.routes?.[0]?.geometry?.coordinates;
+      if (!coords || !coords.length) throw new Error("Lộ trình không có toạ độ");
+
+      // 2. Collect unique zoom 16 tiles along the route
+      const zoom = 16;
+      const tileMap = new Map();
+      coords.forEach(([lon, lat]) => {
+        const tx = lon2tile(lon, zoom);
+        const ty = lat2tile(lat, zoom);
+        for (let dx = -1; dx <= 1; dx++) {
+          for (let dy = -1; dy <= 1; dy++) {
+            const key = `${zoom}_${tx + dx}_${ty + dy}`;
+            tileMap.set(key, { z: zoom, x: tx + dx, y: ty + dy });
+          }
+        }
+      });
+
+      const tiles = Array.from(tileMap.values());
+      const maxTiles = 300;
+      const downloadTiles = tiles.slice(0, maxTiles);
+      const total = downloadTiles.length;
+
+      setMessage(els.offlineMapMessage, `Tìm thấy ${total} ô bản đồ dọc tuyến đường. Bắt đầu tải vào ESP32…`);
+
+      let saved = 0;
+      for (let i = 0; i < total; i++) {
+        const { z, x, y } = downloadTiles[i];
+        const sub = ["a", "b", "c"][(x + y) % 3];
+        const tileUrl = `https://${sub}.basemaps.cartocdn.com/rastertiles/voyager/${z}/${x}/${y}.png`;
+        try {
+          const tileRes = await fetch(tileUrl);
+          if (tileRes.ok) {
+            const blob = await tileRes.blob();
+            const form = new FormData();
+            form.append("tile", blob, `t_${z}_${x}_${y}.png`);
+            await api(`/api/map/tile?z=${z}&x=${x}&y=${y}`, { method: "POST", body: form });
+            saved++;
+          }
+        } catch (_) {}
+        els.offlineMapProgress.value = Math.round(((i + 1) / total) * 100);
+        setMessage(els.offlineMapMessage, `Đang tải map offline: ${i + 1}/${total} (${saved} thành công)…`);
+      }
+
+      setMessage(els.offlineMapMessage, `Đã lưu thành công ${saved} ô bản đồ vào ESP32! Sẵn sàng đi offline không cần mạng!`, "success");
+      await refreshOfflineMapStats();
+    } catch (err) {
+      setMessage(els.offlineMapMessage, `Lỗi tải map offline: ${err.message}`, "error");
+    } finally {
+      els.downloadRouteMap.disabled = false;
+      window.setTimeout(() => els.offlineMapProgress.classList.add("hidden"), 3000);
+    }
+  });
+
+  els.deleteOfflineMap.addEventListener("click", async () => {
+    if (!confirm("Bạn có chắc chắn muốn xóa toàn bộ bản đồ offline đã lưu trong ESP32?")) return;
+    try {
+      await api("/api/map/offline", { method: "DELETE" });
+      setMessage(els.offlineMapMessage, "Đã xóa toàn bộ bản đồ offline.", "success");
+      await refreshOfflineMapStats();
+    } catch (err) {
+      setMessage(els.offlineMapMessage, `Lỗi xóa: ${err.message}`, "error");
+    }
+  });
+
   els.refreshStatus.addEventListener("click", refreshStatus);
   loadOpenStreetMap();
   updateDestination();
   loadConfig();
   refreshStatus();
+  refreshOfflineMapStats();
   window.setInterval(refreshStatus, 2000);
 })();

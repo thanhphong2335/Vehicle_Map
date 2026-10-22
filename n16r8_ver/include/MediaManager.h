@@ -61,6 +61,8 @@ private:
     uint8_t _animationFps = 0;
     uint32_t _animationTotalBytes = 0;
     uint16_t _playbackIndex = 0;
+    uint32_t _playbackStartMs = 0;
+    uint16_t _lastRenderedFrame = 0xFFFF;
     uint32_t _nextFrameAtMs = 0;
     bool _wasNavigationActive = false;
 

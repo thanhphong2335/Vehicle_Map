@@ -42,12 +42,11 @@ Cấu hình mặc định trong [include/PinConfig.h](include/PinConfig.h):
 | :--- | :--- | :--- | :--- |
 | **Màn ST7789** | VCC | 3V3 / 5V | Nguồn màn hình |
 | | GND | GND | Mass |
-| | SCK / CLK | **GPIO 12** | SPI SCLK (FSPI) |
-| | MOSI / SDA | **GPIO 11** | SPI MOSI (FSPI) |
-| | CS | **GPIO 10** | Chip Select |
-| | DC / A0 / RS | **GPIO 9** | Data / Command |
-| | RST / RES | **GPIO 8** | Reset màn hình |
-| | BL / LED | **GPIO 7** | Đèn nền (Backlight, tùy chọn) |
+| | **SCL** / SCK | **GPIO 13** | SPI SCLK (FSPI) |
+| | **SDA** / MOSI | **GPIO 12** | SPI MOSI (FSPI) |
+| | **RST** / RES | **GPIO 11** | Reset màn hình |
+| | **DC** / A0 / RS | **GPIO 10** | Data / Command |
+| | **CS** | **GPIO 9** | Chip Select |
 | **GPS NEO-6M** | VCC | 3V3 / 5V | Nguồn GPS |
 | | GND | GND | Mass |
 | | TX | **GPIO 17** | Nối vào chân RX của ESP32-S3 |
