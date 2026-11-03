@@ -233,6 +233,13 @@ const char* ConnectionManager::networkStateName() const {
 void ConnectionManager::configureRoutes() {
     _server.on("/", HTTP_GET, [this]() { serveFile("/index.html", "text/html; charset=utf-8"); });
     _server.on("/index.html", HTTP_GET, [this]() { serveFile("/index.html", "text/html; charset=utf-8"); });
+    _server.on("/env.js", HTTP_GET, [this]() {
+        if (!LittleFS.exists("/env.js")) {
+            _server.send(200, "application/javascript; charset=utf-8", "window.MOTOMAP_ENV={};");
+            return;
+        }
+        serveFile("/env.js", "application/javascript; charset=utf-8");
+    });
     _server.on("/app.js", HTTP_GET, [this]() { serveFile("/app.js", "application/javascript; charset=utf-8"); });
     _server.on("/styles.css", HTTP_GET, [this]() { serveFile("/styles.css", "text/css; charset=utf-8"); });
     _server.on("/apple-touch-icon.png", HTTP_GET, [this]() { serveFile("/apple-touch-icon.png", "image/png"); });

@@ -49,6 +49,14 @@
         <span id="location-quality" class="tag">Chưa chọn</span>
       </div>
       <form id="search-form" class="stack-form">
+        <label for="search-provider">Nguồn dữ liệu tìm kiếm (API)</label>
+        <select id="search-provider" class="select-control" style="margin-bottom: 8px;">
+          <option value="combined" selected>Kết hợp cả 3 API (Mapbox + LocationIQ + OSM)</option>
+          <option value="auto">Tự động tuần tự (Mapbox → LocationIQ → OSM)</option>
+          <option value="mapbox">Chỉ test Mapbox API</option>
+          <option value="locationiq">Chỉ test LocationIQ API</option>
+          <option value="osm">Chỉ test OpenStreetMap (Nominatim)</option>
+        </select>
         <label for="address-input">Nhập địa chỉ</label>
         <div class="input-row">
           <input id="address-input" type="text" autocomplete="street-address"
@@ -59,7 +67,7 @@
       <form id="coordinate-form" class="stack-form compact-form">
         <label for="coordinate-input">Hoặc nhập tọa độ lat, lon</label>
         <div class="input-row">
-          <input id="coordinate-input" type="text" inputmode="decimal" placeholder="10.8231, 106.6297">
+          <input id="coordinate-input" type="text" inputmode="decimal" placeholder="10.880540, 106.805413">
           <button class="button button-secondary" type="submit">Ghim</button>
         </div>
       </form>
@@ -77,8 +85,16 @@
 
     <section class="card map-card">
       <div class="card-heading">
-        <h2>Bản đồ OpenStreetMap</h2>
-        <span id="map-status" class="tag">Đang tải OSM…</span>
+        <h2>Bản đồ điều hướng</h2>
+        <span id="map-status" class="tag">Đang tải bản đồ…</span>
+      </div>
+      <div style="margin-bottom: 10px;">
+        <label for="map-style" style="font-size: 0.85rem; color: #8b949e;">Nguồn hiển thị bản đồ</label>
+        <select id="map-style" class="select-control" style="margin-top: 4px;">
+          <option value="mapbox" selected>Mapbox Streets v12 (Siêu nét Retina 512px)</option>
+          <option value="google">Google Road Map (Tải nhanh từ máy chủ Google)</option>
+          <option value="osm">OpenStreetMap gốc (Mặc định)</option>
+        </select>
       </div>
       <div id="map" class="map"></div>
       <div class="map-actions">
@@ -245,6 +261,7 @@
     </footer>
   </main>
 
+  <script src="env.js"></script>
   <script src="app.js?v=16fps"></script>
 </body>
 </html>

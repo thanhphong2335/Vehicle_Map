@@ -20,6 +20,11 @@ node_modules/
 .env
 .env.*
 *.secret
+.vscode/.browse.c_cpp.db*
+.vscode/c_cpp_properties.json
+.vscode/launch.json
+.vscode/ipch
+.vscode
 
 # AI & IDE local workspaces
 .kilo/
@@ -32,3 +37,11 @@ __pycache__/
 # OS files
 .DS_Store
 Thumbs.db
+
+.agents
+.note
+.note/doc_env
+doc_env
+*.env
+env.js
+**/data/env.js

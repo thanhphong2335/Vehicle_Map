@@ -31,6 +31,7 @@ exit /b %ERRORLEVEL%
 exit /b %ERRORLEVEL%
 
 :uploadfs
+powershell -ExecutionPolicy Bypass -File "%~dp0tools\sync_env.ps1"
 "%PIO%" run -e esp32s3_n16r8 --target uploadfs
 exit /b %ERRORLEVEL%
 
