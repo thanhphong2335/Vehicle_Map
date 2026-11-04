@@ -11,50 +11,64 @@
 
 # 🇬🇧 English
 
-MotoMap is an open-source, standalone motorcycle navigation and rider safety device powered by ESP32 microcontrollers. Using an onboard GPS module and high-visibility SPI display, MotoMap delivers turn-by-turn navigation without requiring continuous phone screen operation.
+MotoMap is an open-source, automotive-grade motorcycle navigation and rider safety system powered by ESP32 microcontrollers. With an onboard GPS receiver, 6-axis IMU, and an SPI color display, MotoMap delivers standalone turn-by-turn navigation without requiring continuous smartphone screen usage.
 
-### 🚀 Key Hardware Editions
-1. **[ESP32-S3 N16R8 Edition (`n16r8_ver`)](n16r8_ver/README.md) *(Recommended / Active)***:
+```
+       +-----------------------------------------------------------+
+       |                     M O T O M A P                         |
+       |                                                           |
+       |  [GPS Module] ----(UART)----> [ESP32 Microcontroller]     |
+       |  [IMU Sensor] -----(I2C)---->       |       |             |
+       |                                     |       +-> [ST7789 IPS Display]
+       |  [Smartphone Hotspot] <--(Wi-Fi)----+       |
+       |         |                                   +-> [Web UI / LittleFS]
+       |         v
+       |  [Vercel Relay -> Cloudflare Worker]
+       |         v
+       |  [Zalo Bot Platform] ------> [Emergency Relatives' Zalo]
+       +-----------------------------------------------------------+
+```
+
+### 🚀 Hardware Editions
+
+1. **[ESP32-S3 N16R8 Edition (`n16r8_ver`)](n16r8_ver/README.md) *(Recommended / Flagship)***:
    - **Hardware:** ESP32-S3 DevKitC-1 (16 MB Flash, 8 MB Octal PSRAM).
-   - **Display:** 2.0" / 1.69" ST7789 320×240 IPS display.
-   - **Heading-Up Navigation:** Real-time rotating map and route aligned with vehicle heading.
-   - **Double-Buffered in PSRAM:** 400×400 canvas rendered entirely in Octal PSRAM (zero flicker, zero Flash wear).
-   - **Offline Maps:** 13.25 MB LittleFS map tile storage with 3-tier memory caching.
-   - **Fall & Crash Detection:** Real-time IMU MPU-6050 monitoring on FreeRTOS Core 0.
-   - **Automated Emergency SOS:** Auto-triggers location and crash alerts via Cloudflare Gateway to Zalo Bot.
-   - **Video Animations:** Smooth 24 FPS 10-second boot animations loaded into PSRAM.
+   - **Display:** 2.0" / 1.69" ST7789 320×240 IPS.
+   - **Navigation:** Heading-Up rotating map, 400×400 double-buffering in PSRAM via DMA SPI (zero flicker).
+   - **Offline Storage:** 13.25 MB LittleFS for route pre-fetching and offline map caching.
+   - **Safety:** FreeRTOS Core 0 fall detection (MPU-6050) & automated SOS dispatch to Zalo Bot via Cloudflare/Vercel.
+   - **Web UI:** Responsive dark dashboard with collapsible sidebar and Developer Mode.
 
-2. **[ESP32 Classic Edition (`moto_map`)](moto_map/README.md)**:
-   - **Hardware:** ESP32-WROOM-32 / DevKit (4 MB Flash, No PSRAM).
-   - **Display:** GMT147SPI ST7789 172×320 display.
+2. **[ESP32 Classic Edition (`moto_map`)](moto_map/)**:
+   - **Hardware:** ESP32-WROOM-32 (4 MB Flash, No PSRAM).
+   - **Display:** GMT147SPI ST7789 172×320.
    - **Navigation:** Lightweight turn-by-turn arrows and distance indicators.
 
 ### 📱 Smartphone Companion & Web Portal
-- **Web Portal:** Connect your smartphone to the device's hotspot or Wi-Fi to select destinations, download offline map areas, monitor real-time vehicle tilt, and configure emergency contacts.
+- **Web Portal:** Connect your smartphone browser to the device Wi-Fi (`http://192.168.4.1/`) to select destinations, cache offline maps, and configure emergency contacts.
 - **iOS Companion App:** Native Swift application located in [`ios/MotoMap`](ios/MotoMap/README.md).
 
 ---
 
 # 🇻🇳 Tiếng Việt
 
-MotoMap là thiết bị dẫn đường độc lập và cảnh báo an toàn cho xe máy trên nền tảng vi điều khiển ESP32. Kết hợp module định vị GPS và màn hình màu SPI độ sáng cao, MotoMap mang đến trải nghiệm dẫn đường từng khúc cua mà không cần bật sáng màn hình điện thoại liên tục.
+MotoMap là hệ thống dẫn đường độc lập và cảnh báo an toàn thông minh dành cho xe máy trên nền tảng vi điều khiển ESP32. Kết hợp module định vị GPS, cảm biến IMU 6 trục và màn hình màu SPI độ sáng cao, MotoMap mang đến trải nghiệm dẫn đường từng khúc cua tự chủ mà không làm nóng hay hao pin điện thoại.
 
 ### 🚀 Các phiên bản phần cứng
-1. **[Phiên bản ESP32-S3 N16R8 (`n16r8_ver`)](n16r8_ver/README.md) *(Khuyên dùng / Đang phát triển)***:
+
+1. **[Phiên bản ESP32-S3 N16R8 (`n16r8_ver`)](n16r8_ver/README.md) *(Khuyên dùng / Lá cờ đầu)***:
    - **Phần cứng:** ESP32-S3 DevKitC-1 (16 MB Flash, 8 MB Octal PSRAM).
    - **Màn hình:** ST7789 320×240 IPS (2.0" hoặc 1.69").
-   - **Bản đồ xoay theo hướng xe (Heading-Up):** Bản đồ và tuyến đường xoay mượt mà theo góc la bàn / GPS.
-   - **Double-Buffering trong PSRAM:** Canvas 400×400 xử lý hoàn toàn trong 8MB PSRAM (không giật hình, không hại bộ nhớ Flash).
-   - **Bản đồ Offline:** Phân vùng LittleFS 13.25 MB với bộ đệm 3 tầng.
-   - **Phát hiện té ngã (IMU MPU-6050):** Tác vụ FreeRTOS chạy độc lập trên Core 0.
-   - **Cảnh báo cứu hộ SOS tự động:** Tự động gửi định vị và thông báo ngã tới Zalo Bot người thân qua Cloudflare Gateway.
-   - **Video Animation:** Phát video 24 FPS mượt mà trực tiếp từ PSRAM.
+   - **Dẫn đường:** Bản đồ xoay theo hướng xe (Heading-Up), double-buffering 400×400 trong PSRAM qua DMA SPI (không giật hình).
+   - **Bản đồ Offline:** Phân vùng LittleFS 13.25 MB tải trước và lưu trữ bản đồ dọc lộ trình.
+   - **An toàn:** Cảm biến MPU-6050 phát hiện té ngã trên FreeRTOS Core 0 & tự động gửi định vị cứu hộ qua Zalo Bot.
+   - **Web UI:** Giao diện Dark theme hiện đại, thanh bên thu gọn (Sidebar) và phân quyền Chế độ Nhà phát triển.
 
-2. **[Phiên bản ESP32 Classic (`moto_map`)](moto_map/README.md)**:
-   - **Phần cứng:** ESP32 DevKit / WROOM-32 (4 MB Flash, không PSRAM).
+2. **[Phiên bản ESP32 Classic (`moto_map`)](moto_map/)**:
+   - **Phần cứng:** ESP32-WROOM-32 (4 MB Flash, không PSRAM).
    - **Màn hình:** GMT147SPI ST7789 172×320.
    - **Dẫn đường:** Mũi tên chỉ hướng tinh gọn và thanh cự ly rẽ.
 
 ### 📱 Giao diện Web Portal & Ứng dụng điện thoại
-- **Web Portal:** Mở trình duyệt trên điện thoại kết nối vào Wi-Fi của thiết bị để tìm kiếm điểm đến, tải bản đồ offline, theo dõi góc nghiêng xe và cài đặt số Zalo cứu hộ.
+- **Web Portal:** Mở trình duyệt trên điện thoại kết nối vào Wi-Fi của thiết bị (`http://192.168.4.1/`) để tìm kiếm điểm đến, tải bản đồ offline, theo dõi góc nghiêng xe và cài đặt số Zalo cứu hộ.
 - **Ứng dụng iOS:** Ứng dụng Swift tương thích trong thư mục [`ios/MotoMap`](ios/MotoMap/README.md).

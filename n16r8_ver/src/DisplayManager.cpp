@@ -1,4 +1,5 @@
 #include "DisplayManager.h"
+#include "DebugLog.h"
 #include "TextUtils.h"
 
 #include <LittleFS.h>
@@ -32,7 +33,7 @@ String compactDistance(uint32_t meters) {
 DisplayManager::Panel::Panel() {
     {
         auto config = _bus.config();
-        config.spi_host = SPI2_HOST; // FSPI trên ESP32-S3
+        config.spi_host = SPI2_HOST; // FSPI on ESP32-S3
         config.spi_mode = 0;
         config.freq_write = 50000000;
         config.freq_read = 16000000;
@@ -93,6 +94,7 @@ void DisplayManager::begin() {
 
 void DisplayManager::setMode(DeviceMode mode) {
     _mode = mode;
+    if (mode != DeviceMode::Idle) _showingQr = false;
     switch (mode) {
         case DeviceMode::Idle: showIdle(); break;
         case DeviceMode::Media: showMediaPlaceholder(); break;
@@ -181,6 +183,7 @@ void DisplayManager::drawArrow(Maneuver maneuver) {
 
 void DisplayManager::showNavigation(const NavigationData& data) {
     _mode = DeviceMode::Navigation;
+    _showingQr = false;
     _display.fillScreen(TFT_BLACK);
     drawHeader(data.statusMessage.length() ? data.statusMessage.c_str() : "NAVIGATION", TFT_GREEN);
     drawArrow(data.maneuver);
@@ -218,8 +221,54 @@ void DisplayManager::showNavigation(const NavigationData& data) {
 void DisplayManager::showIdle(const String& detail) {
     _mode = DeviceMode::Idle;
 
-    if (drawJpegFile("/ui/setup_background.jpg")) {
-        _mode = DeviceMode::Idle;
+    const bool isWebUrl = (detail.startsWith("http://") || detail.startsWith("https://")) &&
+                          (detail.indexOf("192.168.4.1") < 0);
+    _showingQr = isWebUrl;
+    DEBUG_LOG("DISPLAY", "showIdle: detail='%s', isWebUrl=%d, showingQr=%d",
+              detail.c_str(), isWebUrl ? 1 : 0, _showingQr ? 1 : 0);
+
+    // 1. Try to load the beautiful sci-fi background graphic (/ui/setup_background.jpg)
+    const bool hasBgImage = drawJpegFile("/ui/setup_background.jpg");
+    _mode = DeviceMode::Idle;
+    _showingQr = isWebUrl;
+
+    if (hasBgImage) {
+        // Draw exact header on top of the graphic background
+        _display.setTextSize(2);
+        _display.setTextColor(0xFD20);
+        _display.setCursor(22, 22);
+        _display.print("MOTOMAP S3");
+        _display.setTextSize(1);
+        _display.setTextColor(0xF81F);
+        _display.setCursor(247, 25);
+        _display.print("SYS//READY");
+
+        if (isWebUrl) {
+            // =========================================================================
+            // CONNECTED STATE: ENLARGED QR CODE CENTERED, NO HTTP TEXT, BALANCED UI
+            // =========================================================================
+            const int16_t padSize = (kHeight >= 220) ? 166 : 110;
+            const int16_t padX = (kWidth - padSize) / 2;
+            const int16_t padY = (kHeight >= 220) ? 45 : 38;
+            const int16_t qrSize = (kHeight >= 220) ? 150 : 96;
+            const int16_t qrX = padX + (padSize - qrSize) / 2;
+            const int16_t qrY = padY + (padSize - qrSize) / 2;
+
+            DEBUG_LOG("DISPLAY", "Drawing enlarged QR card (%dx%d at %d,%d) qrSize=%d on setup_background.jpg",
+                      padSize, padSize, padX, padY, qrSize);
+
+            // Pure white rounded card for crisp camera contrast
+            _display.fillRoundRect(padX, padY, padSize, padSize, 6, TFT_WHITE);
+            // LovyanGFX QR code generator (margin=false because 6px white padding is provided)
+            _display.qrcode(detail.c_str(), qrX, qrY, qrSize, 1, false);
+
+            DEBUG_LOG("DISPLAY", "showIdle QR rendered successfully.");
+            return;
+        }
+
+        // =========================================================================
+        // AP SETUP STATE: EXACT ORIGINAL TEXT OVERLAYS ON setup_background.jpg
+        // =========================================================================
         const auto drawOverlayText = [this](const String& text,
                                             int16_t x,
                                             int16_t y,
@@ -230,15 +279,6 @@ void DisplayManager::showIdle(const String& detail) {
             _display.setCursor(x, y);
             _display.print(text);
         };
-
-        _display.setTextSize(2);
-        _display.setTextColor(0xFD20);
-        _display.setCursor(22, 22);
-        _display.print("MOTOMAP S3");
-        _display.setTextSize(1);
-        _display.setTextColor(0xF81F);
-        _display.setCursor(247, 25);
-        _display.print("SYS//READY");
 
         drawOverlayText("WEB:", 24, 45, 1, 0xF81F);
         drawOverlayText(detail, 36, 64, 2, TFT_WHITE);
@@ -254,6 +294,7 @@ void DisplayManager::showIdle(const String& detail) {
         return;
     }
 
+    // 2. Fallback Cyberneon drawn template if setup_background.jpg is missing
     constexpr uint16_t kBackground = 0x1005;
     constexpr uint16_t kCyanNeon = 0xFD20;
     constexpr uint16_t kMagentaNeon = 0xF81F;
@@ -284,6 +325,7 @@ void DisplayManager::showIdle(const String& detail) {
     _display.fillRect(24, 15, 74, 2, kCyanNeon);
     _display.fillRect(113, 14, 94, 3, kMagentaNeon);
     _display.fillRect(224, 15, 70, 2, kCyanNeon);
+
     _display.setTextSize(2);
     _display.setTextColor(kCyanNeon, kBackground);
     _display.setCursor(22, 22);
@@ -293,36 +335,48 @@ void DisplayManager::showIdle(const String& detail) {
     _display.setCursor(247, 25);
     _display.print("SYS//READY");
 
-    _display.setTextColor(kLilacNeon, kBackground);
-    _display.setTextSize(1);
-    _display.setCursor(22, 48);
-    _display.print("LIVE WEB LINK");
-    _display.fillRect(22, 61, kWidth - 44, 1, kTrace);
-    drawCentered(detail, 66, 1, TFT_WHITE, kBackground);
+    if (isWebUrl) {
+        const int16_t padSize = (kHeight >= 220) ? 166 : 110;
+        const int16_t padX = (kWidth - padSize) / 2;
+        const int16_t padY = (kHeight >= 220) ? 45 : 38;
+        const int16_t qrSize = (kHeight >= 220) ? 150 : 96;
+        const int16_t qrX = padX + (padSize - qrSize) / 2;
+        const int16_t qrY = padY + (padSize - qrSize) / 2;
 
-    drawCutFrame(20, 84, kWidth - 40, 35, kCyanNeon);
-    _display.setTextColor(kCyanNeon, kBackground);
-    _display.setTextSize(1);
-    _display.setCursor(32, 91);
-    _display.print("WIFI:");
-    _display.drawFastHLine(82, 96, 180, kTrace);
-    drawCentered("MotoMap-ESP32", 102, 1, TFT_WHITE, kBackground);
+        _display.fillRoundRect(padX, padY, padSize, padSize, 6, TFT_WHITE);
+        _display.qrcode(detail.c_str(), qrX, qrY, qrSize, 1, false);
+    } else {
+        _display.setTextColor(kLilacNeon, kBackground);
+        _display.setTextSize(1);
+        _display.setCursor(22, 48);
+        _display.print("LIVE WEB LINK");
+        _display.fillRect(22, 61, kWidth - 44, 1, kTrace);
+        drawCentered(detail, 66, 1, TFT_WHITE, kBackground);
 
-    drawCutFrame(20, 128, kWidth - 40, 35, kMagentaNeon);
-    _display.setTextColor(kMagentaNeon, kBackground);
-    _display.setTextSize(1);
-    _display.setCursor(32, 135);
-    _display.print("OPEN THIS IN BROWSER");
-    _display.drawFastHLine(148, 140, 114, kTrace);
-    drawCentered("http://192.168.4.1/", 146, 1, kCyanNeon, kBackground);
+        drawCutFrame(20, 84, kWidth - 40, 35, kCyanNeon);
+        _display.setTextColor(kCyanNeon, kBackground);
+        _display.setTextSize(1);
+        _display.setCursor(32, 91);
+        _display.print("WIFI:");
+        _display.drawFastHLine(82, 96, 180, kTrace);
+        drawCentered("MotoMap-ESP32", 102, 1, TFT_WHITE, kBackground);
 
-    drawCutFrame(20, 172, kWidth - 40, 40, kLilacNeon);
-    _display.setTextColor(kLilacNeon, kBackground);
-    _display.setTextSize(1);
-    _display.setCursor(32, 179);
-    _display.print("WIFI PASSWORD");
-    _display.drawFastHLine(122, 184, 140, kTrace);
-    drawCentered("motomap123", 192, 1, TFT_WHITE, kBackground);
+        drawCutFrame(20, 128, kWidth - 40, 35, kMagentaNeon);
+        _display.setTextColor(kMagentaNeon, kBackground);
+        _display.setTextSize(1);
+        _display.setCursor(32, 135);
+        _display.print("OPEN THIS IN BROWSER");
+        _display.drawFastHLine(148, 140, 114, kTrace);
+        drawCentered("http://192.168.4.1/", 146, 1, kCyanNeon, kBackground);
+
+        drawCutFrame(20, 172, kWidth - 40, 40, kLilacNeon);
+        _display.setTextColor(kLilacNeon, kBackground);
+        _display.setTextSize(1);
+        _display.setCursor(32, 179);
+        _display.print("WIFI PASSWORD");
+        _display.drawFastHLine(122, 184, 140, kTrace);
+        drawCentered("motomap123", 192, 1, TFT_WHITE, kBackground);
+    }
 
     for (int16_t x = 34; x <= 58; x += 8) _display.fillRect(x, 220, 3, 3, kCyanNeon);
     for (int16_t x = 262; x <= 286; x += 8) _display.fillRect(x, 220, 3, 3, kMagentaNeon);
@@ -331,6 +385,7 @@ void DisplayManager::showIdle(const String& detail) {
 
 void DisplayManager::showMediaPlaceholder() {
     _mode = DeviceMode::Media;
+    _showingQr = false;
     _display.fillScreen(TFT_BLACK);
     drawHeader("MEDIA", TFT_MAGENTA);
     const int32_t titleY = kHeight >= 220 ? 94 : 70;
@@ -340,6 +395,7 @@ void DisplayManager::showMediaPlaceholder() {
 
 void DisplayManager::showError(const String& message) {
     _mode = DeviceMode::Error;
+    _showingQr = false;
     showStatus("ERROR", message, TFT_RED);
 }
 

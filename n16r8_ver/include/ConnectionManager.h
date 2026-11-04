@@ -1,6 +1,7 @@
 #pragma once
 
 #include <Arduino.h>
+#include <DNSServer.h>
 #include <FS.h>
 #include <WebServer.h>
 
@@ -57,16 +58,23 @@ private:
     uint32_t _stationSwitchAtMs = 0;
     uint8_t _reconnectAttempt = 0;
     bool _mdnsStarted = false;
+    DNSServer _dnsServer;
+    bool _dnsStarted = false;
     bool _uploadRequestOk = false;
     String _uploadRequestError;
     String _testImageUploadData;
     String _testImageUploadError;
     bool _testImageUploadOk = false;
+    IPAddress _lastConnectedIp;
+    String _lastConnectedSsid;
 
     void configureRoutes();
     void startStation();
     void startAccessPoint();
+    void startDnsServer();
+    void stopDnsServer();
     void handleStationConnected();
+    void handleStationDisconnected();
     void scheduleStationSwitch(uint32_t delayMs);
     void updateNetwork();
     bool navigationActive() const;

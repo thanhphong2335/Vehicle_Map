@@ -1,0 +1,9 @@
+{
+  "name": "motomap-zalo-relay",
+  "version": "1.0.0",
+  "description": "Zero-dependency Vercel Serverless Relay for Zalo Bot Webhook",
+  "main": "api/webhook.js",
+  "scripts": {
+    "deploy": "vercel --prod"
+  }
+}

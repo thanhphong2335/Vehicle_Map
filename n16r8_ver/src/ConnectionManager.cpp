@@ -1,4 +1,5 @@
 #include "ConnectionManager.h"
+#include "DebugLog.h"
 
 #include <ArduinoJson.h>
 #include <ESPmDNS.h>
@@ -81,6 +82,7 @@ void ConnectionManager::begin() {
 void ConnectionManager::startStation() {
     if (_stationSsid.length() == 0 &&
         (_settings == nullptr || !_settings->loadWifi(_stationSsid, _stationPassword))) {
+        DEBUG_LOG("WIFI", "startStation: No SSID configured, falling back to AP mode");
         startAccessPoint();
         return;
     }
@@ -89,24 +91,28 @@ void ConnectionManager::startStation() {
         MDNS.end();
         _mdnsStarted = false;
     }
+    DEBUG_LOG("WIFI", "startStation: Connecting to SSID='%s'...", _stationSsid.c_str());
     WiFi.disconnect(true, false);
     // Keep the setup portal available even after joining the user's router.
     // This lets a phone change Wi-Fi credentials at 192.168.4.1 without first
     // taking the old router offline.
     WiFi.mode(WIFI_AP_STA);
     WiFi.softAP(kApSsid, kApPassword);
+    startDnsServer();
     WiFi.begin(_stationSsid.c_str(), _stationPassword.c_str());
     _networkState = NetworkState::Connecting;
     _connectionStartedMs = millis();
     _nextReconnectMs = millis() + kReconnectDelaysMs[0];
     _reconnectAttempt = 0;
-    Serial.printf("Connecting to iPhone hotspot: %s\n", _stationSsid.c_str());
+    Serial.printf("Connecting to WiFi: %s\n", _stationSsid.c_str());
+    DEBUG_LOG("WIFI", "WiFi.begin initiated. Timeout in %u ms.", kStationTimeoutMs);
     if (_display != nullptr && !navigationActive() && (_media == nullptr || !_media->hasTestImage())) {
         _display->showIdle(String("Connecting ") + _stationSsid);
     }
 }
 
 void ConnectionManager::startAccessPoint() {
+    DEBUG_LOG("WIFI", "startAccessPoint: Falling back to AP mode (SSID='%s')...", kApSsid);
     if (_mdnsStarted) {
         MDNS.end();
         _mdnsStarted = false;
@@ -117,6 +123,7 @@ void ConnectionManager::startAccessPoint() {
     WiFi.disconnect(true, false);
     WiFi.mode(hasStation ? WIFI_AP_STA : WIFI_AP);
     WiFi.softAP(kApSsid, kApPassword);
+    startDnsServer();
     if (hasStation) {
         WiFi.begin(_stationSsid.c_str(), _stationPassword.c_str());
         _connectionStartedMs = millis();
@@ -132,15 +139,35 @@ void ConnectionManager::startAccessPoint() {
     Serial.printf("MotoMap setup AP: %s, web: http://%s/\n",
                   kApSsid,
                   WiFi.softAPIP().toString().c_str());
-    if (_display != nullptr && !navigationActive() && (_media == nullptr || !_media->hasTestImage())) {
-        _display->showIdle("AP SETUP ACTIVE");
+    DEBUG_LOG("WIFI", "AP active on IP %s", WiFi.softAPIP().toString().c_str());
+    handleStationDisconnected();
+}
+
+void ConnectionManager::startDnsServer() {
+    if (_dnsStarted) return;
+    if (_dnsServer.start(53, "*", WiFi.softAPIP())) {
+        _dnsStarted = true;
+        Serial.printf("[DNS] Captive Portal DNS server started on %s:53\n",
+                      WiFi.softAPIP().toString().c_str());
+    } else {
+        Serial.println("[DNS] WARNING: Failed to start Captive Portal DNS server!");
     }
 }
 
+void ConnectionManager::stopDnsServer() {
+    if (!_dnsStarted) return;
+    _dnsServer.stop();
+    _dnsStarted = false;
+    Serial.println("[DNS] Captive Portal DNS server stopped.");
+}
+
 void ConnectionManager::handleStationConnected() {
-    // Turn off the setup AP to save ~100mA and cut thermal generation significantly.
-    // If station connection is ever lost, startAccessPoint() turns the AP back on automatically.
-    WiFi.mode(WIFI_STA);
+    // Keep SoftAP running concurrently (WIFI_AP_STA) so the user can always connect
+    // to MotoMap-ESP32 (192.168.4.1) to change Wi-Fi credentials or settings at any time!
+    WiFi.mode(WIFI_AP_STA);
+    WiFi.softAP(kApSsid, kApPassword);
+    startDnsServer();
+
     _networkState = NetworkState::Station;
     _connectionStartedMs = millis();
     _reconnectAttempt = 0;
@@ -148,44 +175,149 @@ void ConnectionManager::handleStationConnected() {
     _mdnsStarted = MDNS.begin(kMdnsName);
     if (_mdnsStarted) MDNS.addService("http", "tcp", 80);
 
-    Serial.printf("WiFi connected. IP: %s, web: http://motomap.local/\n",
-                  WiFi.localIP().toString().c_str());
-    if (_display != nullptr && !navigationActive() && (_media == nullptr || !_media->hasTestImage())) {
-        _display->showIdle(String("http://") + WiFi.localIP().toString() + "/");
+    const IPAddress ip = WiFi.localIP();
+    const IPAddress apIp = WiFi.softAPIP();
+    _lastConnectedIp = ip;
+    _lastConnectedSsid = WiFi.SSID();
+    DEBUG_LOG("WIFI", ">>> STATION CONNECTED! SSID='%s', Station IP=%s, SoftAP IP=%s, RSSI=%d dBm",
+              WiFi.SSID().c_str(), ip.toString().c_str(), apIp.toString().c_str(), WiFi.RSSI());
+    Serial.printf("WiFi connected. Station IP: %s, SoftAP IP: %s, web: http://motomap.local/\n",
+                  ip.toString().c_str(), apIp.toString().c_str());
+
+    const bool navAct = navigationActive();
+    const int routeState = _route ? static_cast<int>(_route->state()) : -1;
+    const bool testImg = (_media != nullptr && _media->hasTestImage());
+    const bool savedImg = (_media != nullptr && _media->hasSavedImage());
+
+    DEBUG_LOG("DISPLAY", "Evaluating showIdle: _display=%p, navActive=%d (routeState=%d), testImage=%d, savedImage=%d",
+              _display, navAct ? 1 : 0, routeState, testImg ? 1 : 0, savedImg ? 1 : 0);
+
+    if (_display != nullptr) {
+        // Only suppress showIdle if actively guiding turn-by-turn driving (Navigating or OffRoute).
+        // If state is Idle or WaitingGps, show the QR code so the user can connect to the webserver!
+        const bool activelyGuiding = _route != nullptr &&
+                                    (_route->state() == RouteState::Navigating ||
+                                     _route->state() == RouteState::OffRoute);
+        if (activelyGuiding) {
+            DEBUG_LOG("DISPLAY", "Suppressed showIdle because active turn-by-turn driving guidance is in progress.");
+        } else if (testImg) {
+            DEBUG_LOG("DISPLAY", "Suppressed showIdle because test image is active.");
+        } else {
+            const String qrUrl = String("http://") + ip.toString() + "/";
+            DEBUG_LOG("DISPLAY", "Triggering _display->showIdle('%s')...", qrUrl.c_str());
+            _display->showIdle(qrUrl);
+            DEBUG_LOG("DISPLAY", "_display->showIdle completed.");
+        }
+    } else {
+        DEBUG_LOG("DISPLAY", "ERROR: _display is null!");
+    }
+}
+
+void ConnectionManager::handleStationDisconnected() {
+    _lastConnectedIp = IPAddress(0, 0, 0, 0);
+
+    DEBUG_LOG("WIFI", "handleStationDisconnected: Reverting screen to standby/waiting mode...");
+
+    // Only suppress reverting if actively guiding turn-by-turn driving (Navigating or OffRoute)
+    const bool activelyGuiding = _route != nullptr &&
+                                (_route->state() == RouteState::Navigating ||
+                                 _route->state() == RouteState::OffRoute);
+    if (activelyGuiding) {
+        DEBUG_LOG("DISPLAY", "Suppressed standby screen because active navigation is in progress.");
+        return;
+    }
+
+    if (_media != nullptr && _media->hasTestImage()) {
+        DEBUG_LOG("DISPLAY", "Suppressed standby screen because test image is active.");
+        return;
+    }
+
+    // 1. If user has a saved custom image, restore it (same behavior as on boot in main.cpp)
+    if (_media != nullptr && _media->hasSavedImage()) {
+        DEBUG_LOG("DISPLAY", "Station disconnected -> Restoring saved user image.");
+        _media->showSavedImage();
+        if (_modeController != nullptr) {
+            _modeController->onMedia(false);
+        }
+        return;
+    }
+
+    // 2. Otherwise revert to initial idle / AP standby screen (setup_background.jpg without QR code)
+    DEBUG_LOG("DISPLAY", "Station disconnected -> Reverting to initial standby screen.");
+    if (_modeController != nullptr) {
+        _modeController->onIdle("Waiting for iPhone");
+    } else if (_display != nullptr) {
+        _display->showIdle("Waiting for iPhone");
     }
 }
 
 void ConnectionManager::scheduleStationSwitch(uint32_t delayMs) {
-    if (_settings == nullptr || !_settings->loadWifi(_stationSsid, _stationPassword)) return;
+    if (_settings == nullptr || !_settings->loadWifi(_stationSsid, _stationPassword)) {
+        DEBUG_LOG("WIFI", "scheduleStationSwitch: Failed to load wifi from settings!");
+        return;
+    }
     _stationSwitchAtMs = millis() + delayMs;
+    DEBUG_LOG("WIFI", "scheduleStationSwitch: Swapping to SSID='%s' in %u ms (at ms=%u)",
+              _stationSsid.c_str(), delayMs, _stationSwitchAtMs);
 }
 
 void ConnectionManager::updateNetwork() {
     const uint32_t now = millis();
     if (_stationSwitchAtMs != 0 && static_cast<int32_t>(now - _stationSwitchAtMs) >= 0) {
         _stationSwitchAtMs = 0;
+        DEBUG_LOG("WIFI", "Station switch timer expired. Calling startStation()...");
         startStation();
         return;
     }
 
-    if (WiFi.status() == WL_CONNECTED) {
-        if (_networkState != NetworkState::Station) handleStationConnected();
+    const wl_status_t wifiStatus = WiFi.status();
+    static wl_status_t sLastWifiStatus = WL_IDLE_STATUS;
+    if (wifiStatus != sLastWifiStatus) {
+        DEBUG_LOG("WIFI", "Status change: %s (%d) -> %s (%d)",
+                  DebugLog::wifiStatusName(sLastWifiStatus), static_cast<int>(sLastWifiStatus),
+                  DebugLog::wifiStatusName(wifiStatus), static_cast<int>(wifiStatus));
+        sLastWifiStatus = wifiStatus;
+    }
+
+    if (wifiStatus == WL_CONNECTED) {
+        const IPAddress localIp = WiFi.localIP();
+        if (localIp[0] == 0) {
+            static uint32_t sLastDhcpWaitMs = 0;
+            if (now - sLastDhcpWaitMs >= 1000) {
+                sLastDhcpWaitMs = now;
+                DEBUG_LOG("WIFI", "WL_CONNECTED established, waiting for DHCP to assign valid IP...");
+            }
+            return;
+        }
+
+        if (_networkState != NetworkState::Station || localIp != _lastConnectedIp || WiFi.SSID() != _lastConnectedSsid) {
+            DEBUG_LOG("WIFI", "Station connected or network changed! Old IP=%s, New IP=%s, SSID='%s'",
+                      _lastConnectedIp.toString().c_str(), localIp.toString().c_str(), WiFi.SSID().c_str());
+            handleStationConnected();
+        }
         return;
     }
 
     if (_networkState == NetworkState::Station) {
+        DEBUG_LOG("WIFI", "Station disconnected! Entering Connecting state...");
         _networkState = NetworkState::Connecting;
         _connectionStartedMs = now;
         _nextReconnectMs = now;
         _reconnectAttempt = 0;
+        handleStationDisconnected();
+    } else if (_display != nullptr && _display->isShowingQr()) {
+        DEBUG_LOG("WIFI", "Wi-Fi is not connected but QR code is visible -> Reverting to standby!");
+        handleStationDisconnected();
     }
 
     if (_networkState == NetworkState::Connecting) {
         if (now - _connectionStartedMs >= kStationTimeoutMs) {
+            DEBUG_LOG("WIFI", "Connection timed out after %u ms! Fallback to AP.", kStationTimeoutMs);
             startAccessPoint();
             return;
         }
         if (static_cast<int32_t>(now - _nextReconnectMs) >= 0) {
+            DEBUG_LOG("WIFI", "Reconnecting to WiFi (attempt %u)...", _reconnectAttempt);
             WiFi.reconnect();
             const uint8_t delayIndex = _reconnectAttempt > 2 ? 2 : _reconnectAttempt;
             _nextReconnectMs = now + kReconnectDelaysMs[delayIndex];
@@ -316,12 +448,46 @@ void ConnectionManager::configureRoutes() {
         },
         [this]() { handleMapTileUpload(); });
 
+    _server.on("/api/debug", HTTP_GET, [this]() {
+        _server.send(200, "text/plain; charset=utf-8", DebugLog::getLogs());
+    });
+    _server.on("/api/debug/clear", HTTP_POST, [this]() {
+        DebugLog::clearLogs();
+        _server.send(200, "application/json", "{\"ok\":true,\"cleared\":true}");
+    });
+    _server.on("/debug", HTTP_GET, [this]() {
+        _server.send(200, "text/plain; charset=utf-8", DebugLog::getLogs());
+    });
+
+    // Captive portal detection endpoints for Apple iOS, Android, and Windows
+    auto handleCaptiveRedirect = [this]() {
+        const String portalUrl = String("http://") + WiFi.softAPIP().toString() + "/";
+        _server.sendHeader("Location", portalUrl, true);
+        _server.send(302, "text/plain", "");
+    };
+
+    _server.on("/hotspot-detect.html", HTTP_GET, handleCaptiveRedirect); // Apple iOS/macOS CNA
+    _server.on("/canonical.html", HTTP_GET, handleCaptiveRedirect);
+    _server.on("/success.txt", HTTP_GET, handleCaptiveRedirect);
+    _server.on("/generate_204", HTTP_GET, handleCaptiveRedirect);        // Android NetworkMonitor
+    _server.on("/gen_204", HTTP_GET, handleCaptiveRedirect);
+    _server.on("/ncsi.txt", HTTP_GET, handleCaptiveRedirect);            // Windows
+    _server.on("/connecttest.txt", HTTP_GET, handleCaptiveRedirect);
+    _server.on("/redirect", HTTP_GET, handleCaptiveRedirect);
+
     _server.onNotFound([this]() {
         if (_server.method() == HTTP_OPTIONS) {
             _server.sendHeader("Access-Control-Allow-Origin", "*");
             _server.sendHeader("Access-Control-Allow-Methods", "GET,POST,DELETE,OPTIONS");
             _server.sendHeader("Access-Control-Allow-Headers", "Content-Type");
             _server.send(204);
+            return;
+        }
+        const String host = _server.hostHeader();
+        if (host.startsWith("192.168.4.") || host.indexOf("motomap") != -1 || _networkState != NetworkState::Station) {
+            const String portalUrl = String("http://") + WiFi.softAPIP().toString() + "/";
+            _server.sendHeader("Location", portalUrl, true);
+            _server.send(302, "text/plain", "");
             return;
         }
         sendError("not_found", 404);
@@ -416,19 +582,24 @@ void ConnectionManager::handleWifiConfig() {
     JsonDocument document;
     String error;
     if (!parseBody(_server, document, error)) {
+        DEBUG_LOG("WIFI", "handleWifiConfig JSON parse error: %s", error.c_str());
         sendError(error, 400);
         return;
     }
     const String ssid = String(document["ssid"] | "");
     const String password = String(document["password"] | "");
     const bool connectNow = document["connect_now"] | false;
+    DEBUG_LOG("WIFI", "Received /api/config/wifi: SSID='%s', passLen=%u, connect_now=%d",
+              ssid.c_str(), password.length(), connectNow ? 1 : 0);
     if (_settings == nullptr || !_settings->saveWifi(ssid, password)) {
+        DEBUG_LOG("WIFI", "ERROR: Failed to save wifi configuration to SettingsStore!");
         sendError("invalid_wifi_config", 400);
         return;
     }
     _stationSsid = ssid;
     _stationPassword = password;
     if (connectNow || (WiFi.status() == WL_CONNECTED && WiFi.SSID() != ssid)) {
+        DEBUG_LOG("WIFI", "Scheduling station switch in 5000 ms...");
         scheduleStationSwitch(5000);
     }
     sendJson(connectNow
@@ -651,6 +822,9 @@ bool ConnectionManager::serveFile(const char* path, const char* contentType) {
 }
 
 void ConnectionManager::loop() {
+    if (_dnsStarted) {
+        _dnsServer.processNextRequest();
+    }
     _server.handleClient();
     updateNetwork();
 }

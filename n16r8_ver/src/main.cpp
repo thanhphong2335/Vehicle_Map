@@ -1,6 +1,7 @@
 #include <Arduino.h>
 
 #include "AlertManager.h"
+#include "DebugLog.h"
 #include "ButtonManager.h"
 #include "ConnectionManager.h"
 #include "DisplayManager.h"
@@ -57,6 +58,7 @@ void onNavigationUpdate(const NavigationData& data) {
 void setup() {
     Serial.begin(115200);
     delay(200);
+    DEBUG_LOG_INIT();
     setCpuFrequencyMhz(240); // Set ESP32-S3 maximum CPU frequency to 240MHz
     Serial.println("\n==============================================");
     Serial.println("  MotoMap ESP32-S3 N16R8 (Heading-Up Navigation)");
@@ -114,7 +116,11 @@ void loop() {
         if (!navigationActive) {
             if (mediaManager.hasTestImage() || modeController.mode() == DeviceMode::Media) {
                 mediaManager.setTestImageActive(false);
-                modeController.onIdle(connectionManager.webAddress());
+                if (connectionManager.internetConnected()) {
+                    modeController.onIdle(connectionManager.webAddress());
+                } else {
+                    modeController.onIdle("Waiting for iPhone");
+                }
             } else if (mediaManager.hasSavedImage()) {
                 mediaManager.showSavedImage();
                 modeController.onMedia(false);

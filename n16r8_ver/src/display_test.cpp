@@ -9,7 +9,7 @@
 class MotoMapDisplay : public lgfx::LGFX_Device {
 public:
     MotoMapDisplay() {
-        // Cấu hình SPI trên ESP32-S3
+        // Configure SPI on ESP32-S3
         auto busConfig = _bus.config();
         busConfig.spi_host = SPI2_HOST;
         busConfig.spi_mode = 0;
@@ -99,11 +99,11 @@ void showNavigationDemo() {
     lcd.print("NAVIGATION S3");
     lcd.drawFastHLine(0, 24, 320, TFT_GREEN);
 
-    // Mũi tên đi thẳng
+    // Straight-ahead maneuver arrow
     lcd.fillRect(47, 75, 18, 55, TFT_CYAN);
     lcd.fillTriangle(56, 40, 26, 78, 86, 78, TFT_CYAN);
 
-    // Khoảng cách và tên đường
+    // Distance and road name
     lcd.setTextColor(TFT_WHITE, TFT_BLACK);
     lcd.setTextSize(3);
     lcd.setCursor(118, 34);
@@ -114,7 +114,7 @@ void showNavigationDemo() {
     lcd.setCursor(118, 75);
     lcd.print("Le Loi Street");
 
-    // Các ô thông tin
+    // Navigation metrics boxes
     lcd.fillRect(116, 108, 76, 38, TFT_DARKGREY);
     lcd.fillRect(196, 108, 58, 38, TFT_DARKGREY);
     lcd.fillRect(258, 108, 62, 38, TFT_DARKGREY);

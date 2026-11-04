@@ -45,7 +45,12 @@
     fallReason: $("fall-reason"), clearFallAlertBtn: $("clear-fall-alert-btn"),
     imuRoll: $("imu-roll"), imuPitch: $("imu-pitch"),
     rollBike: $("rollBike"), pitchScene: $("pitchScene"),
-    imuAccel: $("imu-accel"), imuGyro: $("imu-gyro"), imuTemp: $("imu-temp")
+    imuAccel: $("imu-accel"), imuGyro: $("imu-gyro"), imuTemp: $("imu-temp"),
+    sidebar: $("app-sidebar"), sidebarToggle: $("sidebar-toggle"),
+    sidebarClose: $("sidebar-close"), sidebarOverlay: $("sidebar-overlay"),
+    headerTitle: $("header-title"),
+    devModeToggle: $("dev-mode-toggle"), devModeBadge: $("dev-mode-badge"),
+    devSettingsBox: $("dev-settings-box"), devExtraTools: $("dev-extra-tools")
   };
 
   const state = {
@@ -833,7 +838,7 @@
       state.wifiConfigured = true;
       state.configuredSsid = ssid;
       els.wifiPassword.value = "";
-      setMessage(els.wifiMessage, "ESP32 đã lưu Wi-Fi và đang kết nối. AP MotoMap sẽ tắt; hãy xem IP mới trên Serial Monitor.", "success");
+      setMessage(els.wifiMessage, "ESP32 đã lưu Wi-Fi và đang kết nối. Bạn vẫn có thể kết nối Wi-Fi MotoMap (192.168.4.1) để đổi mạng bất cứ lúc nào.", "success");
     } catch (error) {
       setMessage(els.wifiMessage, `Không lưu được Wi-Fi: ${error.message}`, "error");
       els.saveWifi.disabled = false;
@@ -1706,6 +1711,102 @@
   }
 
   if (els.clearFallAlertBtn) els.clearFallAlertBtn.addEventListener("click", handleClearFallAlert);
+
+  /* ==================== SIDEBAR & NAVIGATION TABS ==================== */
+  function openSidebar() {
+    if (els.sidebar) els.sidebar.classList.add("open");
+    if (els.sidebarOverlay) els.sidebarOverlay.classList.add("active");
+  }
+
+  function closeSidebar() {
+    if (els.sidebar) els.sidebar.classList.remove("open");
+    if (els.sidebarOverlay) els.sidebarOverlay.classList.remove("active");
+  }
+
+  function switchTab(tabName) {
+    const navButtons = document.querySelectorAll(".nav-item");
+    navButtons.forEach((btn) => {
+      if (btn.dataset.tab === tabName) {
+        btn.classList.add("active");
+      } else {
+        btn.classList.remove("active");
+      }
+    });
+
+    const pages = {
+      home: $("view-home"),
+      settings: $("view-settings")
+    };
+
+    Object.keys(pages).forEach((key) => {
+      const page = pages[key];
+      if (!page) return;
+      if (key === tabName) {
+        page.classList.add("active");
+      } else {
+        page.classList.remove("active");
+      }
+    });
+
+    if (els.headerTitle) {
+      els.headerTitle.textContent = tabName === "settings" ? "Cài đặt" : "MotoMap";
+    }
+
+    if (tabName === "home") {
+      if (mapReady() && map && typeof map.invalidateSize === "function") {
+        setTimeout(() => {
+          try { map.invalidateSize(); } catch (_) {}
+        }, 150);
+      }
+    }
+
+    closeSidebar();
+  }
+
+  if (els.sidebarToggle) els.sidebarToggle.addEventListener("click", openSidebar);
+  if (els.sidebarClose) els.sidebarClose.addEventListener("click", closeSidebar);
+  if (els.sidebarOverlay) els.sidebarOverlay.addEventListener("click", closeSidebar);
+
+  document.querySelectorAll(".nav-item").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const tab = btn.dataset.tab;
+      if (tab) switchTab(tab);
+    });
+  });
+
+  /* ==================== DEVELOPER MODE TOGGLE ==================== */
+  function applyDevMode(enabled) {
+    if (els.devModeToggle) els.devModeToggle.checked = enabled;
+    if (els.devModeBadge) {
+      els.devModeBadge.textContent = enabled ? "Đang bật" : "Đang tắt";
+      els.devModeBadge.className = "tag " + (enabled ? "success" : "");
+    }
+    if (els.devSettingsBox) {
+      if (enabled) {
+        els.devSettingsBox.classList.remove("hidden");
+      } else {
+        els.devSettingsBox.classList.add("hidden");
+      }
+    }
+    if (els.devExtraTools) {
+      if (enabled) {
+        els.devExtraTools.classList.remove("hidden");
+      } else {
+        els.devExtraTools.classList.add("hidden");
+      }
+    }
+  }
+
+  const savedDevMode = localStorage.getItem("motomap_dev_mode") === "true";
+  applyDevMode(savedDevMode);
+
+  if (els.devModeToggle) {
+    els.devModeToggle.addEventListener("change", (e) => {
+      const isChecked = e.target.checked;
+      localStorage.setItem("motomap_dev_mode", isChecked ? "true" : "false");
+      applyDevMode(isChecked);
+    });
+  }
 
   els.refreshStatus.addEventListener("click", refreshStatus);
   loadAlertConfig();

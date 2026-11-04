@@ -24,6 +24,8 @@ public:
     bool drawJpegFile(const String& path);
     int32_t width() const { return DisplayConfig::kWidth; }
     int32_t height() const { return DisplayConfig::kHeight; }
+    DeviceMode mode() const { return _mode; }
+    bool isShowingQr() const { return _showingQr; }
 
     lgfx::LGFX_Device& device();
 
@@ -38,6 +40,7 @@ private:
 
     Panel _display;
     DeviceMode _mode = DeviceMode::Idle;
+    bool _showingQr = false;
 
     void drawHeader(const char* title, uint16_t color);
     void drawArrow(Maneuver maneuver);

@@ -357,6 +357,12 @@ void NavigationMapManager::loop(bool internetConnected) {
     processDownloadResult();
     if (!_active) return;
 
+    // Do not render navigation map or warning overlay when showing QR code or in Idle mode
+    if (_display != nullptr && (_display->isShowingQr() || _display->mode() == DeviceMode::Idle)) {
+        _gpsLostNoticeShown = false;
+        return;
+    }
+
     if (!_navigation.gpsValid) {
         if (_gpsLostSinceMs != 0 &&
             millis() - _gpsLostSinceMs >= kGpsLostNoticeDelayMs) {
@@ -762,6 +768,10 @@ void NavigationMapManager::showFallback() {
 
 void NavigationMapManager::showGpsLostOverlay() {
     if (_gpsLostNoticeShown) return;
+    // Keep GPS warning logic, but suppress it when displaying QR code or in Idle mode
+    if (_display != nullptr && (_display->isShowingQr() || _display->mode() == DeviceMode::Idle)) {
+        return;
+    }
     _gpsLostNoticeShown = true;
     _display->device().fillRect(10, DisplayConfig::kHeight - 50, DisplayConfig::kWidth - 20, 36, 0x6000);
     _display->device().drawRect(10, DisplayConfig::kHeight - 50, DisplayConfig::kWidth - 20, 36, TFT_RED);
