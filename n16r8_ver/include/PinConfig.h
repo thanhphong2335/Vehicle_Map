@@ -51,6 +51,10 @@ namespace PinConfig {
 #define PIN_BUTTON 0   // BOOT button on ESP32-S3 board (active LOW)
 #endif
 
+#ifndef PIN_RGB_LED
+#define PIN_RGB_LED 48 // Built-in WS2812 RGB LED on ESP32-S3 DevKitC-1
+#endif
+
 // ==============================================================================
 // I2C Pinout Configuration (IMU MPU-6050 Fall Detection Sensor)
 // Note: Avoid GPIO 9 as it is assigned to PIN_ST7789_CS (SPI Display).
@@ -76,6 +80,8 @@ constexpr int kGpsRxPin = PIN_GPS_RX;
 constexpr int kGpsTxPin = PIN_GPS_TX;
 
 constexpr int kButtonPin = PIN_BUTTON;
+
+constexpr int kRgbLedPin = PIN_RGB_LED;
 
 constexpr int kI2cSdaPin = PIN_I2C_SDA;
 constexpr int kI2cSclPin = PIN_I2C_SCL;

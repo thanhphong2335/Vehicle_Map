@@ -59,6 +59,7 @@ h2 { margin-bottom: 0; font-size: 1.05rem; }
 
 /* ==================== SIDEBAR & OVERLAY ==================== */
 .sidebar-overlay {
+  display: none;
   position: fixed;
   inset: 0;
   background: rgba(0, 0, 0, 0.65);
@@ -70,6 +71,7 @@ h2 { margin-bottom: 0; font-size: 1.05rem; }
   transition: opacity 0.25s ease;
 }
 .sidebar-overlay.active {
+  display: block;
   opacity: 1;
   pointer-events: auto;
 }
@@ -235,6 +237,7 @@ label { color: var(--muted); font-size: 0.84rem; }
 .input-row { align-items: stretch; }
 input[type="text"], input[type="password"], input[type="url"] {
   min-width: 0; width: 100%; padding: 11px 12px; color: var(--text);
+  font-size: 16px; /* Ngăn iOS Safari tự động zoom & reflow viewport */
   background: #0b141b; border: 1px solid #304451; border-radius: 10px; outline: none;
 }
 input[type="text"]:focus, input[type="password"]:focus, input[type="url"]:focus {
@@ -243,6 +246,7 @@ input[type="text"]:focus, input[type="password"]:focus, input[type="url"]:focus 
 .vehicle-picker { display: grid; gap: 7px; margin-top: 15px; }
 .select-control {
   width: 100%; padding: 11px 12px; color: var(--text); background: #0b141b;
+  font-size: 16px;
   border: 1px solid #304451; border-radius: 10px; outline: none;
 }
 .select-control:focus { border-color: var(--primary); box-shadow: 0 0 0 2px rgba(54, 211, 153, 0.18); }

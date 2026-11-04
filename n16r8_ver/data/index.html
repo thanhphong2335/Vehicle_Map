@@ -86,10 +86,12 @@
         <a id="station-web-link" class="button button-secondary hidden" href="#">Mở web hotspot</a>
         <form id="wifi-form" class="stack-form">
           <label for="wifi-ssid">Tên iPhone / tên Wi‑Fi hotspot</label>
-          <input id="wifi-ssid" type="text" maxlength="32" autocomplete="off" placeholder="Ví dụ: iPhone của Phong">
+          <input id="wifi-ssid" type="text" maxlength="32" autocomplete="off" placeholder="Ví dụ: iPhone của Phong"
+                 autocapitalize="none" autocorrect="off" spellcheck="false" readonly onfocus="this.removeAttribute('readonly');">
           <label for="wifi-password">Mật khẩu hotspot</label>
           <input id="wifi-password" type="password" maxlength="63" autocomplete="new-password"
-                 placeholder="Để trống nếu mật khẩu đã lưu">
+                 placeholder="Để trống nếu mật khẩu đã lưu"
+                 autocapitalize="none" autocorrect="off" spellcheck="false" readonly onfocus="this.removeAttribute('readonly');">
           <p class="muted form-note">Trên iPhone: bật Điểm truy cập cá nhân, Cho phép người khác kết nối và Tối đa hóa tương thích.</p>
           <div class="button-row">
             <button id="save-wifi" class="button button-primary" type="submit">Lưu và kết nối Wi-Fi</button>
@@ -115,14 +117,14 @@
           <label for="address-input">Nhập địa chỉ</label>
           <div class="input-row">
             <input id="address-input" type="text" autocomplete="street-address"
-                   placeholder="Ví dụ: 1949 QL1A, TP. Hồ Chí Minh" required>
+                   placeholder="Ví dụ: 1949 QL1A, TP. Hồ Chí Minh" required readonly onfocus="this.removeAttribute('readonly');">
             <button class="button button-primary" type="submit">Tìm</button>
           </div>
         </form>
         <form id="coordinate-form" class="stack-form compact-form">
           <label for="coordinate-input">Hoặc nhập tọa độ lat, lon</label>
           <div class="input-row">
-            <input id="coordinate-input" type="text" inputmode="decimal" placeholder="10.880540, 106.805413">
+            <input id="coordinate-input" type="text" inputmode="decimal" placeholder="10.880540, 106.805413" readonly onfocus="this.removeAttribute('readonly');">
             <button class="button button-secondary" type="submit">Ghim</button>
           </div>
         </form>
@@ -326,6 +328,36 @@
           </div>
           <p id="alert-message" class="message" role="status"></p>
         </form>
+      </section>
+
+      <!-- Cài đặt Hiệu ứng LED RGB Onboard -->
+      <section class="card">
+        <div class="card-heading">
+          <h2>Hiệu ứng LED RGB (WS2812)</h2>
+          <span id="led-status-pill" class="status-pill status-online">Đang chạy</span>
+        </div>
+        <p class="muted">Tùy chỉnh hiệu ứng LED RGB tích hợp trên board ESP32-S3 (chân GPIO 48). Đèn tự động đổi sang chớp đỏ khẩn cấp khi xe ngã.</p>
+        
+        <div class="stack-form">
+          <label for="led-pattern-select">Chế độ hiệu ứng</label>
+          <select id="led-pattern-select" class="select-control">
+            <option value="rainbow" selected>🌈 LED đuổi quang phổ (Rainbow Chase - Mặc định)</option>
+            <option value="breathing">💡 Hiệu ứng thở êm dịu (Breathing)</option>
+            <option value="police">🚨 Chớp kép cảnh sát (Police Strobe)</option>
+            <option value="blink_slow">⚡ Nhấp nháy chậm (Blink 1Hz)</option>
+            <option value="blink_fast">⚡ Nhấp nháy nhanh (Blink 4Hz)</option>
+            <option value="turn_signal">🟡 Nháy vàng xi-nhan (Turn Signal)</option>
+            <option value="off">⭕ Tắt LED</option>
+          </select>
+
+          <label for="led-brightness-slider" style="margin-top: 8px;">Độ sáng: <span id="led-brightness-val">45</span>/255</label>
+          <input id="led-brightness-slider" type="range" min="5" max="255" value="45" style="width: 100%; accent-color: var(--primary);">
+
+          <div class="button-row" style="margin-top: 10px;">
+            <button id="save-led-btn" class="button button-primary" type="button">Áp dụng hiệu ứng</button>
+          </div>
+          <p id="led-message" class="message" role="status"></p>
+        </div>
       </section>
 
       <!-- Chế độ Nhà phát triển (Developer Mode Switch) -->

@@ -13,6 +13,7 @@
 #include "RouteManager.h"
 #include "AlertManager.h"
 #include "ImuManager.h"
+#include "LedManager.h"
 #include "SettingsStore.h"
 #if defined(MOTOMAP_NAV_MAP)
 #include "NavigationMapManager.h"
@@ -389,6 +390,8 @@ void ConnectionManager::configureRoutes() {
     _server.on("/api/alert-test", HTTP_POST, [this]() { handleAlertTest(); });
     _server.on("/api/imu", HTTP_GET, [this]() { handleImuApi(); });
     _server.on("/api/imu/clear-alert", HTTP_POST, [this]() { handleImuClearAlert(); });
+    _server.on("/api/led", HTTP_GET, [this]() { handleLedApiGet(); });
+    _server.on("/api/led", HTTP_POST, [this]() { handleLedApiPost(); });
 
     _server.on("/mode/media", HTTP_POST, [this]() {
         if (navigationActive()) {
@@ -1034,4 +1037,49 @@ void ConnectionManager::handleImuClearAlert() {
         _imu->clearFallAlert();
     }
     sendJson("{\"ok\":true,\"cleared\":true}");
+}
+
+void ConnectionManager::handleLedApiGet() {
+    JsonDocument doc;
+    if (_led != nullptr) {
+        doc["ok"] = true;
+        doc["pattern"] = LedManager::patternName(_led->userPattern());
+        doc["active_pattern"] = LedManager::patternName(_led->pattern());
+        doc["brightness"] = _led->brightness();
+    } else {
+        doc["ok"] = false;
+        doc["error"] = "led_not_available";
+    }
+    String body;
+    serializeJson(doc, body);
+    sendJson(body);
+}
+
+void ConnectionManager::handleLedApiPost() {
+    if (_led == nullptr) {
+        sendError("led_not_available", 503);
+        return;
+    }
+    if (!_server.hasArg("plain")) {
+        sendError("missing_body", 400);
+        return;
+    }
+    JsonDocument doc;
+    DeserializationError error = deserializeJson(doc, _server.arg("plain"));
+    if (error) {
+        sendError("invalid_json", 400);
+        return;
+    }
+    if (!doc["pattern"].isNull()) {
+        const String patternStr = doc["pattern"].as<String>();
+        const LedPattern pat = LedManager::patternFromName(patternStr);
+        _led->setUserPattern(pat);
+    }
+    if (!doc["brightness"].isNull()) {
+        int b = doc["brightness"].as<int>();
+        if (b < 0) b = 0;
+        if (b > 255) b = 255;
+        _led->setBrightness(static_cast<uint8_t>(b));
+    }
+    handleLedApiGet();
 }

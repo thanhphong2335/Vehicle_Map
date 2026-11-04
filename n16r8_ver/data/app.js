@@ -797,7 +797,9 @@
       const config = await api("/api/config");
       state.wifiConfigured = Boolean(config.wifi_configured);
       state.configuredSsid = config.wifi_ssid || "";
-      els.wifiSsid.value = state.configuredSsid;
+      if (document.activeElement !== els.wifiSsid) {
+        els.wifiSsid.value = state.configuredSsid;
+      }
       setMessage(els.wifiMessage, state.wifiConfigured ? "Hotspot đã được lưu trong ESP32." : "Nhập hotspot iPhone lần đầu.", state.wifiConfigured ? "success" : "");
     } catch (error) {
       setMessage(els.wifiMessage, `Không đọc được cấu hình: ${error.message}`, "error");
@@ -1669,6 +1671,9 @@
     try {
       const data = await api("/api/imu");
       if (!data) return;
+      if (document.activeElement && (document.activeElement.tagName === "INPUT" || document.activeElement.tagName === "TEXTAREA")) {
+        return; // Tạm hoãn cập nhật DOM trong lúc người dùng đang gõ phím để tránh iOS WebKit giật focus / bàn phím
+      }
       if (els.imuStatusPill) {
         els.imuStatusPill.textContent = data.connected ? "Hoạt động" : "Chưa kết nối";
         els.imuStatusPill.className = "status-pill " + (data.connected ? "status-online" : "status-offline");
@@ -1808,6 +1813,60 @@
     });
   }
 
+  /* ==================== RGB LED CONTROLS ==================== */
+  const ledEls = {
+    patternSelect: $("led-pattern-select"),
+    brightnessSlider: $("led-brightness-slider"),
+    brightnessVal: $("led-brightness-val"),
+    saveBtn: $("save-led-btn"),
+    message: $("led-message"),
+    statusPill: $("led-status-pill")
+  };
+
+  async function loadLedConfig() {
+    if (!ledEls.patternSelect) return;
+    try {
+      const res = await api("/api/led");
+      if (res && res.ok) {
+        if (res.pattern) ledEls.patternSelect.value = res.pattern;
+        if (res.brightness && ledEls.brightnessSlider) {
+          ledEls.brightnessSlider.value = res.brightness;
+          if (ledEls.brightnessVal) ledEls.brightnessVal.textContent = res.brightness;
+        }
+      }
+    } catch (_) {}
+  }
+
+  async function saveLedConfig() {
+    if (!ledEls.patternSelect) return;
+    setMessage(ledEls.message, "Đang gửi cấu hình LED...");
+    try {
+      const pattern = ledEls.patternSelect.value;
+      const brightness = Number(ledEls.brightnessSlider ? ledEls.brightnessSlider.value : 45);
+      const res = await postJson("/api/led", { pattern, brightness });
+      if (res && res.ok) {
+        setMessage(ledEls.message, "Đã cập nhật hiệu ứng LED!", "success");
+      } else {
+        setMessage(ledEls.message, "Lỗi khi cập nhật hiệu ứng LED.", "error");
+      }
+    } catch (err) {
+      setMessage(ledEls.message, `Không lưu được LED: ${err.message}`, "error");
+    }
+  }
+
+  if (ledEls.brightnessSlider && ledEls.brightnessVal) {
+    ledEls.brightnessSlider.addEventListener("input", () => {
+      ledEls.brightnessVal.textContent = ledEls.brightnessSlider.value;
+    });
+  }
+  if (ledEls.saveBtn) {
+    ledEls.saveBtn.addEventListener("click", saveLedConfig);
+  }
+  if (ledEls.patternSelect) {
+    ledEls.patternSelect.addEventListener("change", saveLedConfig);
+  }
+
+  loadLedConfig();
   els.refreshStatus.addEventListener("click", refreshStatus);
   loadAlertConfig();
   loadImuData();

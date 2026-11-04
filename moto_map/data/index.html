@@ -31,10 +31,13 @@
       <a id="station-web-link" class="button button-secondary hidden" href="#">Mở web hotspot</a>
       <form id="wifi-form" class="stack-form">
         <label for="wifi-ssid">Tên iPhone / tên Wi‑Fi hotspot</label>
-        <input id="wifi-ssid" type="text" maxlength="32" autocomplete="off" placeholder="Ví dụ: iPhone của Phong">
+        <input id="wifi-ssid" type="text" maxlength="32" autocomplete="off" placeholder="Ví dụ: iPhone của Phong"
+               autocapitalize="none" autocorrect="off" spellcheck="false" readonly onfocus="this.removeAttribute('readonly');">
         <label for="wifi-password">Mật khẩu hotspot</label>
         <input id="wifi-password" type="password" maxlength="63" autocomplete="new-password"
-               placeholder="Để trống nếu mật khẩu đã lưu">
+               placeholder="Để trống nếu mật khẩu đã lưu"
+               autocapitalize="none" autocorrect="off" spellcheck="false" readonly onfocus="this.removeAttribute('readonly');">
+
         <p class="muted form-note">Trên iPhone: bật Điểm truy cập cá nhân, Cho phép người khác kết nối và Tối đa hóa tương thích.</p>
         <div class="button-row">
           <button id="save-wifi" class="button button-primary" type="submit">Lưu và kết nối Wi-Fi</button>

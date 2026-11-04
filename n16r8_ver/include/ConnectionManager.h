@@ -14,6 +14,7 @@ class SettingsStore;
 class NavigationMapManager;
 class AlertManager;
 class ImuManager;
+class LedManager;
 
 class ConnectionManager {
 public:
@@ -31,6 +32,7 @@ public:
     void loop();
     bool internetConnected() const;
     String webAddress() const;
+    void setLedManager(LedManager* led) { _led = led; }
 
 private:
     enum class NetworkState : uint8_t {
@@ -49,6 +51,7 @@ private:
     NavigationMapManager* _mapManager;
     AlertManager* _alertManager;
     ImuManager* _imu;
+    LedManager* _led = nullptr;
     File _tileUploadFile;
     NetworkState _networkState = NetworkState::Connecting;
     String _stationSsid;
@@ -101,6 +104,8 @@ private:
     void handleAlertTest();
     void handleImuApi();
     void handleImuClearAlert();
+    void handleLedApiGet();
+    void handleLedApiPost();
 
     void sendJson(const String& body, int status = 200);
     void sendError(const String& error, int status);

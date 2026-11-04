@@ -7,6 +7,7 @@
 #include "DisplayManager.h"
 #include "GpsManager.h"
 #include "ImuManager.h"
+#include "LedManager.h"
 #include "MediaManager.h"
 #include "ModeController.h"
 #if defined(MOTOMAP_NAV_MAP)
@@ -25,6 +26,7 @@ ImuManager imuManager(&alertManager, &gpsManager);
 MediaManager mediaManager(&displayManager);
 ModeController modeController(&displayManager);
 RouteManager routeManager(&gpsManager, &settingsStore);
+LedManager ledManager(PinConfig::kRgbLedPin);
 #if defined(MOTOMAP_NAV_MAP)
 NavigationMapManager navigationMapManager(&displayManager, &routeManager);
 #endif
@@ -73,6 +75,7 @@ void setup() {
     }
 
     buttonManager.begin();
+    ledManager.begin();
     displayManager.begin();
     settingsStore.begin();
     alertManager.begin();
@@ -84,6 +87,7 @@ void setup() {
 #endif
     modeController.begin();
     routeManager.begin(onNavigationUpdate);
+    connectionManager.setLedManager(&ledManager);
     connectionManager.begin();
 
     if (mediaManager.hasSavedImage()) {
@@ -94,6 +98,7 @@ void setup() {
 
 void loop() {
     buttonManager.loop();
+    ledManager.loop();
     gpsManager.loop();
     connectionManager.loop();
     routeManager.loop(connectionManager.internetConnected());
@@ -107,6 +112,17 @@ void loop() {
                                   routeState == RouteState::Navigating ||
                                   routeState == RouteState::OffRoute ||
                                   routeState == RouteState::Error;
+
+    static uint32_t s_lastLedUpdate = 0;
+    if (millis() - s_lastLedUpdate >= 100) {
+        s_lastLedUpdate = millis();
+        const bool fall = imuManager.isFallDetected();
+        const bool nav = (routeState == RouteState::Navigating);
+        const bool turn = nav && (routeManager.currentNavigation().distanceToTurnM > 0 && routeManager.currentNavigation().distanceToTurnM <= 80);
+        const bool gpsOk = gpsManager.snapshot().valid;
+        const bool wifiOk = connectionManager.internetConnected();
+        ledManager.updateFromSystem(fall, nav, turn, gpsOk, wifiOk);
+    }
 
     if (buttonManager.wasPressed()) {
         Serial.printf("[BUTTON] Clicked! Mode: %s, hasTestImage: %s, hasSavedImage: %s\n",
