@@ -6,14 +6,11 @@
 
 enum class LedPattern : uint8_t {
     Off,
-    Solid,          // Sáng màu tĩnh
-    BlinkSlow,      // Nhấp nháy chậm (1Hz)
-    BlinkFast,      // Nhấp nháy nhanh (4Hz)
-    Breathing,      // Hiệu ứng thở (sáng dần / tối dần theo hình sin)
-    PoliceStrobe,   // Chớp kép ưu tiên kiểu cảnh sát (Đỏ - Xanh dương)
-    RainbowChase,   // "LED đuổi" chuyển màu dải quang phổ (HSV Color Wheel Chase)
-    TurnSignal,     // Nháy vàng cảnh báo chuyển hướng / rẽ
-    SosFallAlert    // Chớp đỏ rực khẩn cấp khi xe ngã / SOS
+    Solid,
+    PoliceStrobe,
+    RainbowChase,
+    TurnSignal,
+    SosFallAlert
 };
 
 class LedManager {
@@ -23,19 +20,15 @@ public:
     void begin();
     void loop();
 
-    // Thiết lập kiểu hiệu ứng đang chạy (runtime)
     void setPattern(LedPattern pattern, uint32_t color = 0x00FF00);
     LedPattern pattern() const { return _pattern; }
 
-    // Thiết lập hiệu ứng người dùng mong muốn (Default / Base pattern)
-    void setUserPattern(LedPattern pattern, uint32_t color = 0);
+    void setUserPattern(LedPattern pattern, uint32_t color = 0x00FF88);
     LedPattern userPattern() const { return _userPattern; }
 
-    // Chỉnh độ sáng tổng thể (0 - 255). Mặc định 40
     void setBrightness(uint8_t brightness);
     uint8_t brightness() const { return _brightness; }
 
-    // Tự động cập nhật theo trạng thái xe (chỉ ghi đè khi ngã xe SOS hoặc xi-nhan rẽ)
     void updateFromSystem(bool fallDetected, bool navigating, bool turnImminent, bool gpsLocked, bool wifiConnected);
 
     static const char* patternName(LedPattern pattern);

@@ -50,7 +50,8 @@
     sidebarClose: $("sidebar-close"), sidebarOverlay: $("sidebar-overlay"),
     headerTitle: $("header-title"),
     devModeToggle: $("dev-mode-toggle"), devModeBadge: $("dev-mode-badge"),
-    devSettingsBox: $("dev-settings-box"), devExtraTools: $("dev-extra-tools")
+    devSettingsBox: $("dev-settings-box"), devExtraTools: $("dev-extra-tools"),
+    otaCard: $("ota-card")
   };
 
   const state = {
@@ -319,7 +320,7 @@
 
   async function searchAddressWithMapbox(query, apiKey) {
     const ref = getReferenceCoords();
-    // 1. Ưu tiên Mapbox Search Box API v1 (hỗ trợ POI, tòa nhà, trường học, quán xá và số nhà tại VN cực chuẩn)
+    // 1. Prioritize Mapbox Search Box API v1 (accurate POIs, buildings, and addresses)
     const sbParams = new URLSearchParams({
       q: query,
       access_token: apiKey,
@@ -327,7 +328,7 @@
       language: "vi",
       limit: "5"
     });
-    // Không ép proximity cố định nếu người dùng tìm địa chỉ chứa dấu phẩy (tỉnh/thành cụ thể)
+    // Do not force proximity if query contains a comma (specific province/city)
     if (!query.includes(",")) {
       sbParams.set("proximity", ref.lon + "," + ref.lat);
     }
@@ -356,7 +357,7 @@
       }
     } catch (_) {}
 
-    // 2. Dự phòng sang Mapbox Geocoding API v5
+    // 2. Fallback to Mapbox Geocoding API v5
     try {
       const v5Params = new URLSearchParams({
         access_token: apiKey,
@@ -389,7 +390,7 @@
 
   async function searchAddressWithLocationIq(query, apiKey) {
     const ref = getReferenceCoords();
-    // 1. Thử gọi Autocomplete
+    // 1. Try Autocomplete API
     const autoParams = new URLSearchParams({
       key: apiKey,
       q: query,
@@ -412,7 +413,7 @@
       }
     } catch (_) {}
 
-    // 2. Nếu Autocomplete ít kết quả hoặc tìm địa danh tỉnh thành cụ thể, bổ sung thêm Search API v1
+    // 2. Fall back to Search API v1 if autocomplete returns few results
     if (results.length < 3) {
       try {
         const searchParams = new URLSearchParams({
@@ -506,13 +507,13 @@
     "quan", "huyen", "thi", "xa", "thanh", "tinh", "phuong"
   ]);
 
-  // Chấm điểm độ khớp giữa từ khóa tìm kiếm và kết quả
+  // Score match relevance between search query and candidate result
   function calculateRelevanceScore(item, rawQuery) {
     const normQuery = cleanVietnameseText(rawQuery);
     const allTokens = normQuery.split(" ").filter((t) => t.length > 1);
     if (allTokens.length === 0) return 100;
 
-    // Lọc loại trừ các từ chỉ loại hình/hành chính chung chung (trường, tiểu học, đường, quận...)
+    // Filter out generic administrative or place-type terms
     const keyTokens = allTokens.filter((t) => !GENERIC_VIET_WORDS.has(t));
     const effectiveTokens = keyTokens.length > 0 ? keyTokens : allTokens;
 
@@ -521,7 +522,7 @@
     const normFull = cleanVietnameseText(item.display_name || "");
     const combined = normName + " " + normFull;
 
-    // Kiểm tra từng cụm con được phân tách bằng dấu phẩy (vd: "trường tiểu học hùng vương", "vĩnh long")
+    // Check comma-separated sub-phrases
     const subPhrases = rawQuery
       .toLowerCase()
       .split(",")
@@ -535,7 +536,7 @@
       }
     });
 
-    // Đếm từ khóa cốt lõi xuất hiện trong kết quả
+    // Count core matching keywords
     let matchedKeyTokens = 0;
     effectiveTokens.forEach((t) => {
       if (combined.includes(t)) matchedKeyTokens++;
@@ -543,14 +544,14 @@
 
     const keyRatio = matchedKeyTokens / effectiveTokens.length;
 
-    // Nếu người dùng nhập có địa danh/tỉnh thành (có dấu phẩy, >= 2 vế):
-    // Phải khớp ít nhất 1 cụm hoặc tối thiểu 60% từ khóa cốt lõi, nếu không là kết quả nhận vơ khác địa phương!
+    // Multi-segment query validation (province/city matching):
+    // Must match at least one segment or >= 60% of core keywords to avoid false local positives
     if (subPhrases.length >= 2 && phraseMatches === 0 && keyRatio < 0.6) {
       return 0;
     }
 
     let score = (keyRatio * 60) + (phraseMatches * 30);
-    // Thưởng thêm nếu vế đầu (tên địa điểm) xuất hiện trực tiếp trong tên chính
+    // Bonus weight if primary venue name matches the main title
     if (subPhrases[0] && normName.includes(subPhrases[0])) {
       score += 20;
     }
@@ -564,29 +565,29 @@
     (locationIqList || []).forEach((item) => tagged.push({ ...item, _source: "locationiq" }));
     (osmList || []).forEach((item) => tagged.push({ ...item, _source: "osm" }));
 
-    // 1. Tính điểm liên quan cho từng kết quả
+    // 1. Compute relevance score for each candidate
     tagged.forEach((item) => {
       item._score = calculateRelevanceScore(item, rawQuery);
     });
 
-    // 2. Lọc bỏ các kết quả có điểm = 0 (bị loại hoàn toàn vì lệch địa phương/không khớp tên cốt lõi)
+    // 2. Discard candidates with zero score
     let filtered = tagged.filter((item) => item._score > 0);
 
-    // Nếu lọc hết (do không có kết quả chuẩn tuyệt đối), dùng lại danh sách gốc để người dùng tự xem
+    // Fallback to original candidates if all filtered out
     if (filtered.length === 0) {
       filtered = tagged;
     }
 
-    // 3. Sắp xếp kết quả: Điểm liên quan cao nhất lên đầu
+    // 3. Sort candidates by descending relevance score
     filtered.sort((a, b) => b._score - a._score);
 
-    // 4. Khử trùng lặp theo tọa độ (< 35m) và giới hạn trong lãnh thổ Việt Nam
+    // 4. Deduplicate close coordinates (< 35m) and restrict to Vietnam bounding box
     const deduplicated = [];
     for (const item of filtered) {
       const lat = Number(item.lat);
       const lon = Number(item.lon);
       if (!Number.isFinite(lat) || !Number.isFinite(lon)) continue;
-      // Khóa phạm vi lãnh thổ Việt Nam (Vĩ độ: 8.0 - 23.6, Kinh độ: 102.0 - 110.0)
+      // Vietnam geographical bounding box: Lat 8.0 - 23.6, Lon 102.0 - 110.0
       if (lat < 8.0 || lat > 23.6 || lon < 102.0 || lon > 110.0) continue;
 
       const isDuplicate = deduplicated.some((existing) => {
@@ -711,7 +712,7 @@
         return;
       }
 
-      // Chế độ Tự động tuần tự: Mapbox -> LocationIQ -> OSM
+      // Sequential search cascade: Mapbox -> LocationIQ -> OSM
       if (hasMapbox) {
         setMessage(els.searchMessage, "Đang tìm kiếm qua Mapbox…");
         try {
@@ -1425,7 +1426,7 @@
 
     setMessage(els.mediaMessage, "Đang chuẩn bị lưu video…");
 
-    // Tắt ngay chế độ stream live nếu đang chạy để không làm nghẽn WebServer ESP32
+    // Stop live stream if running to free ESP32 WebServer
     state.mediaActive = false;
     if (state.mediaTimer !== null) {
       window.clearInterval(state.mediaTimer);
@@ -1440,7 +1441,7 @@
     els.animationProgress.max = 100;
     els.animationProgress.value = 0;
 
-    // Đợi frame stream đang dở kết thúc hoàn toàn
+    // Wait for pending stream frame to complete
     while (state.frameInFlight) {
       await new Promise(resolve => setTimeout(resolve, 50));
     }
@@ -1452,11 +1453,11 @@
       els.videoPreview.play().then(() => els.videoPreview.pause()).catch(() => {});
 
       const duration = Math.min(10.0, Math.max(0.2, Number(els.videoPreview.duration) || 1.0));
-      // Tốc độ 16 FPS chuẩn xác theo thời gian thực (đảm bảo ESP32-S3 giải mã mượt mà 1.0x, không bị chậm thành 4s)
+      // 16 FPS target rate for smooth 1.0x real-time playback on ESP32-S3
       const fps = 16;
       const totalFrames = Math.min(160, Math.max(2, Math.round(duration * fps)));
 
-      // Ngân sách PSRAM cho animation: 3.5 MB (~22 KB/frame ở 160 frames)
+      // PSRAM budget for animation: ~3.5 MB
       const targetRamBudget = 3500000;
       const maxFrameBytes = Math.min(MAX_FRAME_BYTES, Math.max(12000, Math.floor(targetRamBudget / totalFrames)));
 
@@ -1483,7 +1484,7 @@
       els.animationProgress.value = 100;
       setMessage(els.mediaMessage, `Đã lưu animation (${totalFrames} frames @ ${fps} fps). Đang phát trên màn hình!`, "success");
 
-      // Cưỡng chế ESP32 chuyển sang Media mode ngay
+      // Switch ESP32 to Media mode immediately
       try {
         await postJson("/mode/media", {});
       } catch (_) {}
@@ -1800,6 +1801,13 @@
         els.devExtraTools.classList.add("hidden");
       }
     }
+    if (els.otaCard) {
+      if (enabled) {
+        els.otaCard.classList.remove("hidden");
+      } else {
+        els.otaCard.classList.add("hidden");
+      }
+    }
   }
 
   const savedDevMode = localStorage.getItem("motomap_dev_mode") === "true";
@@ -1866,7 +1874,168 @@
     ledEls.patternSelect.addEventListener("change", saveLedConfig);
   }
 
+  /* ==================== WEB OTA CONTROLS ==================== */
+  const otaEls = {
+    fileInput: $("ota-file-input"),
+    fileHint: $("ota-file-hint"),
+    uploadBtn: $("ota-upload-btn"),
+    typeRadios: document.querySelectorAll('input[name="ota-type"]'),
+    progressContainer: $("ota-progress-container"),
+    progressStatus: $("ota-progress-status"),
+    progressPct: $("ota-progress-pct"),
+    progressFill: $("ota-progress-fill"),
+    progressSub: $("ota-progress-sub"),
+    message: $("ota-message"),
+    statusPill: $("ota-status-pill"),
+    infoPartition: $("info-ota-partition")
+  };
+
+  async function loadOtaInfo() {
+    try {
+      const res = await api("/api/ota/info");
+      if (res && res.ok) {
+        if (otaEls.infoPartition) {
+          otaEls.infoPartition.textContent = `${res.running_partition} (kế tiếp: ${res.next_partition})`;
+        }
+      }
+    } catch (_) {}
+  }
+
+  function updateOtaHint() {
+    const selectedType = document.querySelector('input[name="ota-type"]:checked')?.value || 'firmware';
+    if (!otaEls.fileHint) return;
+    if (selectedType === 'filesystem') {
+      otaEls.fileHint.innerHTML = 'Chọn file <code>littlefs.bin</code> (hoặc nạp qua <code>build.cmd otafs</code>).';
+    } else {
+      otaEls.fileHint.innerHTML = 'Chọn file <code>firmware.bin</code> (từ thư mục <code>n16r8_ver/.pio/build/esp32s3_n16r8/</code>).';
+    }
+  }
+
+  if (otaEls.typeRadios) {
+    otaEls.typeRadios.forEach(radio => {
+      radio.addEventListener('change', updateOtaHint);
+    });
+  }
+
+  if (otaEls.fileInput) {
+    otaEls.fileInput.addEventListener('change', () => {
+      const hasFile = otaEls.fileInput.files && otaEls.fileInput.files.length > 0;
+      if (otaEls.uploadBtn) otaEls.uploadBtn.disabled = !hasFile;
+      if (hasFile) {
+        const file = otaEls.fileInput.files[0];
+        const sizeMb = (file.size / (1024 * 1024)).toFixed(2);
+        setMessage(otaEls.message, `Đã chọn: ${file.name} (${sizeMb} MB)`);
+      }
+    });
+  }
+
+  function setOtaProgress(pct, statusText, subText) {
+    if (otaEls.progressContainer) otaEls.progressContainer.classList.remove('hidden');
+    if (otaEls.progressPct) otaEls.progressPct.textContent = `${pct}%`;
+    if (otaEls.progressFill) otaEls.progressFill.style.width = `${pct}%`;
+    if (statusText && otaEls.progressStatus) otaEls.progressStatus.textContent = statusText;
+    if (subText && otaEls.progressSub) otaEls.progressSub.textContent = subText;
+  }
+
+  function startOtaRebootCountdown(seconds) {
+    let remain = seconds;
+    const interval = setInterval(() => {
+      remain--;
+      if (remain > 0) {
+        setOtaProgress(100, `ESP32 đang khởi động lại... (${remain}s)`, 'Vui lòng đợi thiết bị kết nối lại Wi-Fi.');
+      } else {
+        clearInterval(interval);
+        setOtaProgress(100, 'Đang tải lại trang...', 'Đang kết nối lại...');
+        setTimeout(() => {
+          window.location.reload();
+        }, 1000);
+      }
+    }, 1000);
+  }
+
+  async function handleOtaUpload() {
+    if (!otaEls.fileInput || !otaEls.fileInput.files || otaEls.fileInput.files.length === 0) {
+      setMessage(otaEls.message, "Vui lòng chọn file .bin trước khi nạp!", "error");
+      return;
+    }
+
+    const file = otaEls.fileInput.files[0];
+    const selectedType = document.querySelector('input[name="ota-type"]:checked')?.value || 'firmware';
+    const typeLabel = (selectedType === 'filesystem') ? 'Giao diện LittleFS' : 'Firmware Code';
+
+    if (!confirm(`Bạn có chắc muốn nạp ${typeLabel} (${(file.size / (1024 * 1024)).toFixed(2)} MB) vào ESP32 không?`)) {
+      return;
+    }
+
+    if (otaEls.uploadBtn) otaEls.uploadBtn.disabled = true;
+    if (otaEls.fileInput) otaEls.fileInput.disabled = true;
+    if (otaEls.statusPill) {
+      otaEls.statusPill.textContent = "Đang nạp OTA...";
+      otaEls.statusPill.className = "status-pill status-connecting";
+    }
+
+    setOtaProgress(0, `Đang gửi ${typeLabel}...`, "Đang truyền dữ liệu qua Wi-Fi. Không tắt nguồn thiết bị!");
+    setMessage(otaEls.message, "");
+
+    const formData = new FormData();
+    formData.append("update", file, file.name);
+
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", `/api/ota/update?type=${encodeURIComponent(selectedType)}`, true);
+
+    xhr.upload.onprogress = (e) => {
+      if (e.lengthComputable && e.total > 0) {
+        const pct = Math.min(99, Math.round((e.loaded / e.total) * 100));
+        const loadedMb = (e.loaded / (1024 * 1024)).toFixed(2);
+        const totalMb = (e.total / (1024 * 1024)).toFixed(2);
+        setOtaProgress(pct, `Đang truyền: ${pct}% (${loadedMb}MB / ${totalMb}MB)`, "Vui lòng duy trì kết nối Wi-Fi...");
+      }
+    };
+
+    xhr.onload = () => {
+      if (xhr.status >= 200 && xhr.status < 300) {
+        setOtaProgress(100, "Nạp hoàn tất 100%!", "ESP32 đang áp dụng bản nạp và tự khởi động lại...");
+        setMessage(otaEls.message, "Cập nhật thành công! ESP32 đang khởi động lại...", "success");
+        if (otaEls.statusPill) {
+          otaEls.statusPill.textContent = "Khởi động lại";
+          otaEls.statusPill.className = "status-pill status-online";
+        }
+        startOtaRebootCountdown(12);
+      } else {
+        let errStr = "Lỗi khi nạp OTA";
+        try {
+          const res = JSON.parse(xhr.responseText);
+          if (res.error) errStr = res.error;
+        } catch (_) {}
+        setMessage(otaEls.message, `Nạp thất bại: ${errStr} (HTTP ${xhr.status})`, "error");
+        if (otaEls.uploadBtn) otaEls.uploadBtn.disabled = false;
+        if (otaEls.fileInput) otaEls.fileInput.disabled = false;
+        if (otaEls.statusPill) {
+          otaEls.statusPill.textContent = "Lỗi";
+          otaEls.statusPill.className = "status-pill status-offline";
+        }
+      }
+    };
+
+    xhr.onerror = () => {
+      setMessage(otaEls.message, "Lỗi kết nối mạng trong quá trình truyền OTA!", "error");
+      if (otaEls.uploadBtn) otaEls.uploadBtn.disabled = false;
+      if (otaEls.fileInput) otaEls.fileInput.disabled = false;
+      if (otaEls.statusPill) {
+        otaEls.statusPill.textContent = "Lỗi";
+        otaEls.statusPill.className = "status-pill status-offline";
+      }
+    };
+
+    xhr.send(formData);
+  }
+
+  if (otaEls.uploadBtn) {
+    otaEls.uploadBtn.addEventListener("click", handleOtaUpload);
+  }
+
   loadLedConfig();
+  loadOtaInfo();
   els.refreshStatus.addEventListener("click", refreshStatus);
   loadAlertConfig();
   loadImuData();

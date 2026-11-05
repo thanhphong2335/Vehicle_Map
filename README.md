@@ -35,8 +35,9 @@ MotoMap is an open-source, automotive-grade motorcycle navigation and rider safe
    - **Hardware:** ESP32-S3 DevKitC-1 (16 MB Flash, 8 MB Octal PSRAM).
    - **Display:** 2.0" / 1.69" ST7789 320×240 IPS.
    - **Navigation:** Heading-Up rotating map, 400×400 double-buffering in PSRAM via DMA SPI (zero flicker).
-   - **Offline Storage:** 13.25 MB LittleFS for route pre-fetching and offline map caching.
-   - **Safety:** FreeRTOS Core 0 fall detection (MPU-6050) & automated SOS dispatch to Zalo Bot via Cloudflare/Vercel.
+   - **Offline Storage:** 6.68 MB LittleFS for route pre-fetching and offline map caching.
+   - **OTA Updates:** Safe Dual-Bank OTA (4.5 MB app0/app1) supporting Web OTA and ArduinoOTA over Wi-Fi.
+   - **Safety & Status:** FreeRTOS Core 0 fall detection (MPU-6050), automated Zalo SOS dispatch, and onboard WS2812 RGB LED (GPIO 48).
    - **Web UI:** Responsive dark dashboard with collapsible sidebar and Developer Mode.
 
 2. **[ESP32 Classic Edition (`moto_map`)](moto_map/)**:
@@ -60,8 +61,9 @@ MotoMap là hệ thống dẫn đường độc lập và cảnh báo an toàn t
    - **Phần cứng:** ESP32-S3 DevKitC-1 (16 MB Flash, 8 MB Octal PSRAM).
    - **Màn hình:** ST7789 320×240 IPS (2.0" hoặc 1.69").
    - **Dẫn đường:** Bản đồ xoay theo hướng xe (Heading-Up), double-buffering 400×400 trong PSRAM qua DMA SPI (không giật hình).
-   - **Bản đồ Offline:** Phân vùng LittleFS 13.25 MB tải trước và lưu trữ bản đồ dọc lộ trình.
-   - **An toàn:** Cảm biến MPU-6050 phát hiện té ngã trên FreeRTOS Core 0 & tự động gửi định vị cứu hộ qua Zalo Bot.
+   - **Bản đồ Offline:** Phân vùng LittleFS 6.68 MB tải trước và lưu trữ bản đồ dọc lộ trình.
+   - **Nạp từ xa (OTA):** Cấu trúc Dual-Bank an toàn (4.5 MB app0/app1), hỗ trợ nạp Web OTA qua trình duyệt và ArduinoOTA qua Wi-Fi.
+   - **An toàn & Chỉ báo:** Cảm biến MPU-6050 phát hiện té ngã trên FreeRTOS Core 0, gửi định vị cứu hộ qua Zalo Bot, và LED RGB WS2812 tích hợp (GPIO 48).
    - **Web UI:** Giao diện Dark theme hiện đại, thanh bên thu gọn (Sidebar) và phân quyền Chế độ Nhà phát triển.
 
 2. **[Phiên bản ESP32 Classic (`moto_map`)](moto_map/)**:

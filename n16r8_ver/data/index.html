@@ -47,7 +47,7 @@
           <circle cx="12" cy="12" r="3"></circle>
           <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
         </svg>
-        <span class="nav-label">Cài đặt (Settings)</span>
+        <span class="nav-label">Cài đặt</span>
       </button>
     </nav>
 
@@ -284,7 +284,7 @@
       </section>
     </div>
 
-    <!-- ==================== TAB CÀI ĐẶT (SETTINGS) ==================== -->
+    <!-- ==================== TAB CÀI ĐẶT ==================== -->
     <div id="view-settings" class="view-page">
       <!-- Cài đặt Cảnh báo SOS & Zalo -->
       <section class="card">
@@ -341,13 +341,10 @@
         <div class="stack-form">
           <label for="led-pattern-select">Chế độ hiệu ứng</label>
           <select id="led-pattern-select" class="select-control">
-            <option value="rainbow" selected>🌈 LED đuổi quang phổ (Rainbow Chase - Mặc định)</option>
-            <option value="breathing">💡 Hiệu ứng thở êm dịu (Breathing)</option>
-            <option value="police">🚨 Chớp kép cảnh sát (Police Strobe)</option>
-            <option value="blink_slow">⚡ Nhấp nháy chậm (Blink 1Hz)</option>
-            <option value="blink_fast">⚡ Nhấp nháy nhanh (Blink 4Hz)</option>
-            <option value="turn_signal">🟡 Nháy vàng xi-nhan (Turn Signal)</option>
-            <option value="off">⭕ Tắt LED</option>
+            <option value="rainbow" selected>LED đuổi quang phổ (Rainbow Chase - Mặc định)</option>
+            <option value="police">Chớp kép cảnh sát (Police Strobe)</option>
+            <option value="turn_signal">Nháy vàng xi-nhan (Turn Signal)</option>
+            <option value="off">Tắt LED</option>
           </select>
 
           <label for="led-brightness-slider" style="margin-top: 8px;">Độ sáng: <span id="led-brightness-val">45</span>/255</label>
@@ -396,10 +393,62 @@
               <a href="/api/alert-config" target="_blank" class="dev-link">/api/alert-config ↗</a>
             </div>
             <div>
+              <span class="metric-label">Thông tin OTA</span>
+              <a href="/api/ota/info" target="_blank" class="dev-link">/api/ota/info ↗</a>
+            </div>
+            <div>
               <span class="metric-label">Vercel Zalo Relay</span>
               <a href="https://motomap-zalo-relay.vercel.app" target="_blank" class="dev-link">motomap-zalo-relay ↗</a>
             </div>
           </div>
+        </div>
+      </section>
+
+      <!-- Cập nhật Từ Xa (Web OTA Update) (Dành cho Nhà phát triển) -->
+      <section id="ota-card" class="card hidden">
+        <div class="card-heading">
+          <h2>Cập nhật Từ Xa (Web OTA)</h2>
+          <div style="display:flex; gap:8px; align-items:center;">
+            <span class="tag">Nhà phát triển</span>
+            <span id="ota-status-pill" class="status-pill status-online">Sẵn sàng</span>
+          </div>
+        </div>
+        <p class="muted">Nạp Firmware (.bin) hoặc Giao diện Web (LittleFS) trực tiếp qua Wi-Fi từ điện thoại hoặc máy tính mà không cần cắm dây.</p>
+        
+        <div class="stack-form">
+          <label style="font-weight:600; margin-bottom:4px;">Loại gói cập nhật:</label>
+          <div class="ota-type-selector">
+            <label class="ota-radio-label">
+              <input type="radio" name="ota-type" value="firmware" checked>
+              <span>⚡ Firmware Code (firmware.bin)</span>
+            </label>
+            <label class="ota-radio-label">
+              <input type="radio" name="ota-type" value="filesystem">
+              <span>🌐 Web & Giao diện (littlefs.bin)</span>
+            </label>
+          </div>
+
+          <label for="ota-file-input" style="margin-top:10px;">Chọn file cập nhật (.bin):</label>
+          <input id="ota-file-input" class="file-input" type="file" accept=".bin">
+          <p id="ota-file-hint" class="muted form-note">File firmware.bin nằm trong thư mục <code>n16r8_ver/.pio/build/esp32s3_n16r8/</code></p>
+
+          <div class="button-row" style="margin-top:12px;">
+            <button id="ota-upload-btn" class="button button-primary" type="button" disabled>Bắt đầu Nạp OTA</button>
+          </div>
+
+          <!-- Khu vực hiển thị tiến trình OTA -->
+          <div id="ota-progress-container" class="hidden" style="margin-top:14px;">
+            <div style="display:flex; justify-content:space-between; font-size:0.86rem; margin-bottom:6px;">
+              <span id="ota-progress-status" style="font-weight:600;">Đang chuẩn bị...</span>
+              <span id="ota-progress-pct" style="font-weight:700; color:var(--primary);">0%</span>
+            </div>
+            <div class="progress-track" style="height:10px; background:rgba(255,255,255,0.08); border-radius:6px; overflow:hidden;">
+              <div id="ota-progress-fill" style="width:0%; height:100%; background:var(--primary); transition:width 0.2s ease;"></div>
+            </div>
+            <p id="ota-progress-sub" class="muted form-note" style="margin-top:6px; text-align:center;">Vui lòng giữ nguồn và duy trì kết nối Wi-Fi trong quá trình nạp.</p>
+          </div>
+
+          <p id="ota-message" class="message" role="status"></p>
         </div>
       </section>
 
@@ -418,6 +467,10 @@
             <tr>
               <td>Bộ nhớ:</td>
               <td>16MB Flash (LittleFS) + 8MB PSRAM Octal</td>
+            </tr>
+            <tr>
+              <td>Phân vùng OTA:</td>
+              <td><span id="info-ota-partition">Đang đọc...</span></td>
             </tr>
             <tr>
               <td>Màn hình:</td>
@@ -443,6 +496,6 @@
   </main>
 
   <script src="env.js"></script>
-  <script src="app.js?v=2.0"></script>
+  <script src="app.js?v=2.1"></script>
 </body>
 </html>

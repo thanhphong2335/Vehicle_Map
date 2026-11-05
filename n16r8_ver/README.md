@@ -44,7 +44,7 @@ Equipped with an onboard GPS receiver, a 6-DoF inertial measurement unit (IMU), 
 2. **Double-Buffering in 8 MB Octal PSRAM:**  
    A 400×400 canvas rendered entirely in PSRAM via DMA SPI at 240 MHz CPU clock. Zero screen flicker, zero Flash degradation.
 3. **Proactive Route Tile Pre-Fetching & Offline Maps:**  
-   Background worker pre-caches map tiles along upcoming route segments into 13.25 MB LittleFS storage with 3-tier memory caching for uninterrupted navigation in dead zones.
+   Background worker pre-caches map tiles along upcoming route segments into 6.68 MB LittleFS storage with 3-tier memory caching for uninterrupted navigation in dead zones.
 4. **Autonomous Fall & Crash Detection (FreeRTOS Core 0):**  
    Continuous 6-DoF motion tracking. If vehicle tilt (Roll/Pitch) exceeds 45° continuously for 5 seconds, an emergency state is automatically latched and dispatched.
 5. **Automated Emergency SOS via Zalo Bot:**  
@@ -53,6 +53,10 @@ Equipped with an onboard GPS receiver, a 6-DoF inertial measurement unit (IMU), 
    Responsive mobile/desktop web portal featuring collapsible navigation sidebar, destination search, live tilt visualization, offline tile downloads, and Developer Mode partition.
 7. **Standby Screen & Dynamic QR Code:**  
    Displays an enlarged high-contrast QR code for instant smartphone connection when connected to Wi-Fi/4G. Reverts to the clean AP standby screen as soon as connection is lost.
+8. **Dual-Bank OTA & Wireless Updating:**  
+   Fail-safe dual-bank architecture (`app0` 4.5MB, `app1` 4.5MB) with automatic rollback protection. Supports in-browser Web OTA flashing directly from smartphone/PC as well as LAN ArduinoOTA via port 3232.
+9. **Onboard WS2812 RGB Status Indicator:**  
+   Hardware-driven RGB LED on GPIO 48 providing real-time visual feedback: 360° spectrum chase, high-visibility police strobe, amber turn indicators, and emergency SOS flashes.
 
 ---
 
@@ -72,6 +76,7 @@ Equipped with an onboard GPS receiver, a 6-DoF inertial measurement unit (IMU), 
 | **MPU-6050 IMU** | SDA | **GPIO 8** | I2C Data (SDA) |
 | | SCL | **GPIO 7** | I2C Clock (SCL) |
 | | VCC / GND | 3V3 / GND | Power & Ground |
+| **Onboard RGB LED** | DATA | **GPIO 48** | WS2812 Addressable RGB LED |
 | **BOOT Button** | BOOT / KEY | **GPIO 0** | Onboard Button (Active LOW) |
 
 ---
@@ -94,6 +99,10 @@ cd n16r8_ver
 
 :: 3. Monitor serial logs
 .\build.cmd monitor
+
+:: 4. (Optional) Wireless OTA update over Wi-Fi
+.\build.cmd ota [ESP32_IP]      :: Flash firmware.bin over ArduinoOTA
+.\build.cmd otafs [ESP32_IP]    :: Flash littlefs.bin over ArduinoOTA
 ```
 
 *(Note: Close the Serial Monitor before running `upload` or `uploadfs` to prevent COM port conflicts).*
@@ -105,10 +114,10 @@ cd n16r8_ver
 The Web Server runs locally on ESP32-S3 with a dark-themed responsive interface:
 - **Collapsible Sidebar:** Tap the hamburger icon on top-left to toggle between:
   - 🗺️ **Home & Maps:** Hotspot Wi-Fi config, Destination search, Leaflet Map with Retina 512px tiles, turn-by-turn status, offline map downloader, and real-time IMU visualizer.
-  - ⚙️ **Settings:** Zalo SOS alert configuration, recipient phone numbers, and Developer Mode toggle.
+  - ⚙️ **Settings:** Zalo SOS alert configuration, recipient phone numbers, onboard RGB LED pattern/brightness controls, and Developer Mode toggle.
 - **Developer Mode Switch:**
-  - *Standard Mode (Default):* Clean user interface showing only recipient phone numbers and the Zalo alert activation toggle.
-  - *Developer Mode (Active):* Unlocks advanced fields for Cloudflare Gateway URL, Bearer Auth Token, and quick API endpoint diagnostic links (`/api/status`, `/api/imu`, `/api/alert-config`).
+  - *Standard Mode (Default):* Clean user interface showing only essential settings.
+  - *Developer Mode (Active):* Unlocks advanced fields for Cloudflare Gateway URL, Bearer Auth Token, diagnostic endpoints (`/api/status`, `/api/imu`, `/api/alert-config`, `/api/ota/info`), and in-browser **Web OTA Firmware & Filesystem Updater**.
 
 ---
 
@@ -149,7 +158,7 @@ Thiết bị tích hợp module định vị vệ tinh GPS, cảm biến đo chu
 2. **Double-Buffering 100% trong 8 MB PSRAM:**  
    Canvas 400×400 xử lý và xoay hoàn toàn trong bộ nhớ Octal PSRAM qua kênh DMA SPI tốc độ 240 MHz. Không giật hình, không hao mòn bộ nhớ Flash.
 3. **Tải trước bản đồ theo lộ trình (Pre-Fetching) & Bản đồ Offline:**  
-   Tác vụ nền tự động tải trước các mảnh bản đồ dọc theo cung đường sắp đi và lưu vào phân vùng LittleFS 13.25 MB, giúp dẫn đường liên tục ngay cả khi vào vùng mất sóng 4G.
+   Tác vụ nền tự động tải trước các mảnh bản đồ dọc theo cung đường sắp đi và lưu vào phân vùng LittleFS 6.68 MB, giúp dẫn đường liên tục ngay cả khi vào vùng mất sóng 4G.
 4. **Phát hiện té ngã tự động (IMU FreeRTOS Core 0):**  
    Cảm biến MPU-6050 liên tục theo dõi góc nghiêng Roll/Pitch. Khi xe nghiêng quá 45° trong 5 giây, hệ thống tự động xác nhận sự cố tai nạn.
 5. **Tự động gửi cảnh báo cứu hộ qua Zalo Bot:**  
@@ -158,6 +167,10 @@ Thiết bị tích hợp module định vị vệ tinh GPS, cảm biến đo chu
    Giao diện Dark Theme hiện đại, có thanh bên (Sidebar) chuyển tab Trang chủ / Cài đặt, bản đồ Retina sắc nét, bộ hiển thị góc nghiêng xe 3D và phân quyền Chế độ Nhà phát triển.
 7. **Màn hình chờ thông minh & Mã QR tự động:**  
    Khi có mạng Wi-Fi/4G, màn hình hiển thị mã QR phóng to để điện thoại quét kết nối nhanh. Khi ngắt 4G hoặc mất kết nối, màn hình lập tức hạ về giao diện chờ ban đầu không mã QR.
+8. **Nạp phần mềm từ xa (Dual-Bank OTA):**  
+   Cấu trúc 2 phân vùng ứng dụng độc lập (`app0` 4.5MB, `app1` 4.5MB) chống brick thiết bị. Hỗ trợ nạp Web OTA trực tiếp từ trình duyệt và nạp qua mạng LAN ArduinoOTA (port 3232).
+9. **Đèn chỉ báo RGB WS2812 tích hợp:**  
+   Điều khiển trực tiếp bóng LED RGB trên chân GPIO 48: hiệu ứng LED đuổi quang phổ, chớp kép cảnh sát, nháy vàng xi-nhan và chớp đỏ dồn dập khi té ngã.
 
 ---
 
@@ -177,6 +190,7 @@ Thiết bị tích hợp module định vị vệ tinh GPS, cảm biến đo chu
 | **Cảm biến IMU MPU-6050** | SDA | **GPIO 8** | Dữ liệu I2C (SDA) |
 | | SCL | **GPIO 7** | Xung nhịp I2C (SCL) |
 | | VCC / GND | 3V3 / GND | Nguồn & Mass |
+| **LED RGB tích hợp** | DATA | **GPIO 48** | LED RGB WS2812 điều khiển màu |
 | **Nút nhấn BOOT** | BOOT / KEY | **GPIO 0** | Nút bấm tích hợp trên mạch |
 
 ---
@@ -196,6 +210,10 @@ cd n16r8_ver
 
 :: 3. Mở Serial Monitor theo dõi thông tin
 .\build.cmd monitor
+
+:: 4. (Tùy chọn) Nạp không dây qua Wi-Fi (ArduinoOTA)
+.\build.cmd ota [ESP32_IP]      :: Nạp firmware.bin qua Wi-Fi
+.\build.cmd otafs [ESP32_IP]    :: Nạp littlefs.bin qua Wi-Fi
 ```
 
 *(Lưu ý: Luôn đóng Serial Monitor trước khi chạy `upload` hoặc `uploadfs` để tránh lỗi tranh chấp cổng COM).*
@@ -210,10 +228,10 @@ cd n16r8_ver
 2. **Thanh bên điều hướng (Collapsible Sidebar):**
    - Bấm vào biểu tượng 3 dấu gạch ở góc trên bên trái để mở thanh bên.
    - **Trang chủ & Bản đồ:** Nhập Wi-Fi hotspot của điện thoại, tìm kiếm điểm đến, xem lộ trình và đồ họa góc nghiêng xe máy thời gian thực.
-   - **Cài đặt (Settings):** Nhập số điện thoại người nhận cứu hộ Zalo, kích hoạt công tắc cảnh báo.
+   - **Cài đặt:** Nhập số điện thoại người nhận cứu hộ Zalo, tùy chỉnh hiệu ứng/độ sáng đèn LED RGB, và quản lý các tùy chọn thiết bị.
 3. **Chế độ Nhà phát triển (Developer Mode):**
-   - Mặc định ở chế độ người dùng: ẩn toàn bộ các URL máy chủ Cloudflare và Auth Token để tránh bấm nhầm.
-   - Khi bật công tắc **Chế độ Nhà phát triển**: hiển thị đầy đủ Cloudflare Gateway URL, Gateway Auth Token và bảng liên kết kiểm tra nhanh các API hệ thống (`/api/status`, `/api/imu`, `/api/alert-config`).
+   - Mặc định ở chế độ người dùng: giao diện gọn gàng, ẩn toàn bộ các URL máy chủ Cloudflare, Auth Token và khu vực nạp OTA để đảm bảo an toàn.
+   - Khi bật công tắc **Chế độ Nhà phát triển**: hiển thị đầy đủ Cloudflare Gateway URL, Gateway Auth Token, bảng liên kết kiểm tra nhanh các API hệ thống (`/api/status`, `/api/imu`, `/api/alert-config`, `/api/ota/info`), và **công cụ nạp Firmware/Filesystem từ xa (Web OTA)** trực tiếp trên trình duyệt.
 
 ---
 
@@ -249,11 +267,12 @@ n16r8_ver/
 │   └── ui/setup_background.jpg       # Ảnh nền màn hình chờ Cyberneon (320x240)
 ├── include/                          # Header files C++
 │   ├── AlertManager.h                # Quản lý hàng đợi và tác vụ gửi cảnh báo SOS
-│   ├── ConnectionManager.h           # Wi-Fi Station, SoftAP, WebServer, Captive Portal
+│   ├── ConnectionManager.h           # Wi-Fi Station, SoftAP, WebServer, Captive Portal, OTA
 │   ├── DebugLog.h                    # Hệ thống ghi log (tắt mặc định, 0% RAM/ROM)
 │   ├── DisplayConfig.h               # Thông số phần cứng màn hình LCD ST7789
 │   ├── DisplayManager.h              # Quản lý đồ họa LovyanGFX, mã QR, màn hình chờ
 │   ├── ImuManager.h                  # Đọc cảm biến MPU-6050, thuật toán phát hiện té ngã
+│   ├── LedManager.h                  # Quản lý hiệu ứng đèn RGB WS2812 onboard
 │   ├── NavigationMapManager.h        # Bộ dựng bản đồ xoay Heading-Up trong PSRAM
 │   ├── PinConfig.h                   # Cấu hình chân GPIO phần cứng an toàn
 │   └── RouteManager.h                # Quản lý lộ trình dẫn đường OSRM
@@ -261,6 +280,7 @@ n16r8_ver/
 ├── tools/
 │   ├── cloudflare_alert_worker/      # Cloudflare Worker Gateway + KV Database
 │   └── zalo_relay_vercel/            # Vercel Serverless Webhook Relay
-├── build.cmd                         # Script Windows tự động build, upload, monitor
+├── build.cmd                         # Script Windows tự động build, upload, monitor, ota
+├── partitions_16mb.csv               # Bảng phân vùng Dual-Bank OTA 16MB Flash
 └── platformio.ini                    # Cấu hình môi trường biên dịch PlatformIO
 ```

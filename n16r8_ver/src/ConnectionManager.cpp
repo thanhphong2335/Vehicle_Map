@@ -5,6 +5,10 @@
 #include <ESPmDNS.h>
 #include <LittleFS.h>
 #include <WiFi.h>
+#include <ArduinoOTA.h>
+#include <Update.h>
+#include <esp_ota_ops.h>
+#include <esp_partition.h>
 
 #include "DisplayManager.h"
 #include "GpsManager.h"
@@ -78,6 +82,43 @@ void ConnectionManager::begin() {
     // Starting WebServer before WiFi.mode()/WiFi.begin() can trigger an
     // lwIP "Invalid mbox" assertion on ESP32.
     _server.begin();
+
+    // Setup ArduinoOTA for direct IDE/PlatformIO flashing over Wi-Fi
+    ArduinoOTA.setHostname("motomap-esp32");
+    ArduinoOTA.onStart([this]() {
+        String type = (ArduinoOTA.getCommand() == U_FLASH) ? "sketch" : "filesystem";
+        if (ArduinoOTA.getCommand() == U_SPIFFS) {
+            LittleFS.end();
+        }
+        Serial.printf("[ArduinoOTA] Start updating %s\n", type.c_str());
+        if (_display != nullptr) {
+            _display->showStatus("ARDUINO OTA", type, TFT_MAGENTA);
+        }
+        if (_led != nullptr) {
+            _led->setPattern(LedPattern::PoliceStrobe, 0xFF00FF);
+        }
+    });
+    ArduinoOTA.onEnd([this]() {
+        Serial.println("\n[ArduinoOTA] Update complete. Rebooting...");
+        if (_display != nullptr) {
+            _display->showStatus("OTA SUCCESS", "Rebooting...", TFT_GREEN);
+        }
+        if (_led != nullptr) {
+            _led->setPattern(LedPattern::Solid, 0x00FF00);
+        }
+    });
+    ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
+        if (total > 0) {
+            Serial.printf("[ArduinoOTA] Progress: %u%%\r", (progress / (total / 100)));
+        }
+    });
+    ArduinoOTA.onError([this](ota_error_t error) {
+        Serial.printf("[ArduinoOTA] Error[%u]\n", error);
+        if (_display != nullptr) {
+            _display->showStatus("OTA ERROR", String("Code: ") + String(error), TFT_RED);
+        }
+    });
+    ArduinoOTA.begin();
 }
 
 void ConnectionManager::startStation() {
@@ -392,6 +433,12 @@ void ConnectionManager::configureRoutes() {
     _server.on("/api/imu/clear-alert", HTTP_POST, [this]() { handleImuClearAlert(); });
     _server.on("/api/led", HTTP_GET, [this]() { handleLedApiGet(); });
     _server.on("/api/led", HTTP_POST, [this]() { handleLedApiPost(); });
+    _server.on("/api/ota/info", HTTP_GET, [this]() { handleOtaInfo(); });
+    _server.on(
+        "/api/ota/update",
+        HTTP_POST,
+        [this]() { handleOtaUpdateDone(); },
+        [this]() { handleOtaUploadProgress(); });
 
     _server.on("/mode/media", HTTP_POST, [this]() {
         if (navigationActive()) {
@@ -829,6 +876,7 @@ void ConnectionManager::loop() {
         _dnsServer.processNextRequest();
     }
     _server.handleClient();
+    ArduinoOTA.handle();
     updateNetwork();
 }
 
@@ -1082,4 +1130,110 @@ void ConnectionManager::handleLedApiPost() {
         _led->setBrightness(static_cast<uint8_t>(b));
     }
     handleLedApiGet();
+}
+
+void ConnectionManager::handleOtaInfo() {
+    const esp_partition_t* running = esp_ota_get_running_partition();
+    const esp_partition_t* next = esp_ota_get_next_update_partition(nullptr);
+
+    JsonDocument doc;
+    doc["ok"] = true;
+    doc["running_partition"] = running ? running->label : "unknown";
+    doc["next_partition"] = next ? next->label : "unknown";
+    doc["flash_size_bytes"] = ESP.getFlashChipSize();
+    doc["sketch_size_bytes"] = ESP.getSketchSize();
+    doc["free_sketch_space"] = ESP.getFreeSketchSpace();
+    doc["chip_model"] = ESP.getChipModel();
+    doc["chip_revision"] = ESP.getChipRevision();
+    doc["cpu_freq_mhz"] = ESP.getCpuFreqMHz();
+    doc["free_heap"] = ESP.getFreeHeap();
+    doc["free_psram"] = ESP.getFreePsram();
+    doc["littlefs_total"] = LittleFS.totalBytes();
+    doc["littlefs_used"] = LittleFS.usedBytes();
+
+    String response;
+    serializeJson(doc, response);
+    sendJson(response);
+}
+
+void ConnectionManager::handleOtaUpdateDone() {
+    _server.sendHeader("Connection", "close");
+    if (Update.hasError()) {
+        String err = String("OTA Update failed: ") + Update.errorString();
+        Serial.printf("[OTA] %s\n", err.c_str());
+        if (_display != nullptr) {
+            _display->showStatus("OTA ERROR", Update.errorString(), TFT_RED);
+        }
+        if (_led != nullptr) {
+            _led->setPattern(LedPattern::PoliceStrobe, 0xFF0000);
+        }
+        sendError(err, 500);
+    } else {
+        Serial.println("[OTA] Update completed successfully! Rebooting in 1s...");
+        if (_display != nullptr) {
+            _display->showStatus("UPDATE SUCCESS", "Rebooting...", TFT_GREEN);
+        }
+        if (_led != nullptr) {
+            _led->setPattern(LedPattern::Solid, 0x00FF00);
+        }
+        sendJson("{\"ok\":true,\"message\":\"Update successful! Rebooting...\"}");
+        _server.client().flush();
+        delay(1000);
+        ESP.restart();
+    }
+}
+
+void ConnectionManager::handleOtaUploadProgress() {
+    HTTPUpload& upload = _server.upload();
+    if (upload.status == UPLOAD_FILE_START) {
+        _otaInProgress = true;
+        _otaWrittenBytes = 0;
+        _otaError = "";
+
+        // Determine if uploading firmware (U_FLASH) or filesystem (U_SPIFFS)
+        int cmd = U_FLASH;
+        if (_server.hasArg("type") && _server.arg("type") == "filesystem") {
+            cmd = U_SPIFFS;
+        } else if (upload.filename.indexOf("littlefs") >= 0 || upload.filename.indexOf("spiffs") >= 0) {
+            cmd = U_SPIFFS;
+        }
+        _otaCommand = cmd;
+
+        const char* typeName = (cmd == U_SPIFFS) ? "Filesystem" : "Firmware";
+        Serial.printf("[OTA] Starting %s update. Filename: %s\n", typeName, upload.filename.c_str());
+
+        if (cmd == U_SPIFFS) {
+            LittleFS.end();
+        }
+
+        if (_display != nullptr) {
+            _display->showStatus("OTA UPDATING", String("Flashing ") + typeName, TFT_MAGENTA);
+        }
+        if (_led != nullptr) {
+            _led->setPattern(LedPattern::PoliceStrobe, 0xFF00FF);
+        }
+
+        if (!Update.begin(UPDATE_SIZE_UNKNOWN, cmd)) {
+            Update.printError(Serial);
+            _otaError = Update.errorString();
+        }
+    } else if (upload.status == UPLOAD_FILE_WRITE) {
+        _otaWrittenBytes += upload.currentSize;
+        if (Update.write(upload.buf, upload.currentSize) != upload.currentSize) {
+            Update.printError(Serial);
+            _otaError = Update.errorString();
+        }
+    } else if (upload.status == UPLOAD_FILE_END) {
+        if (Update.end(true)) {
+            Serial.printf("[OTA] Update Success: %u bytes\n", _otaWrittenBytes);
+        } else {
+            Update.printError(Serial);
+            _otaError = Update.errorString();
+        }
+        _otaInProgress = false;
+    } else if (upload.status == UPLOAD_FILE_ABORTED) {
+        Update.abort();
+        _otaInProgress = false;
+        Serial.println("[OTA] Update was aborted.");
+    }
 }

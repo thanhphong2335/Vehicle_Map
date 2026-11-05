@@ -68,6 +68,10 @@ private:
     String _testImageUploadData;
     String _testImageUploadError;
     bool _testImageUploadOk = false;
+    bool _otaInProgress = false;
+    size_t _otaWrittenBytes = 0;
+    int _otaCommand = 0;
+    String _otaError;
     IPAddress _lastConnectedIp;
     String _lastConnectedSsid;
 
@@ -106,6 +110,9 @@ private:
     void handleImuClearAlert();
     void handleLedApiGet();
     void handleLedApiPost();
+    void handleOtaInfo();
+    void handleOtaUpdateDone();
+    void handleOtaUploadProgress();
 
     void sendJson(const String& body, int status = 200);
     void sendError(const String& error, int status);

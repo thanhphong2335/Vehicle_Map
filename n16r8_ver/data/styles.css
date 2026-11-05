@@ -504,6 +504,35 @@ input[type="text"]:focus, input[type="password"]:focus, input[type="url"]:focus 
   color: var(--muted);
 }
 
+/* ==================== OTA UPDATER STYLES ==================== */
+.ota-type-selector {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 4px;
+}
+.ota-radio-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  background: #182833;
+  padding: 8px 14px;
+  border: 1px solid var(--card-border);
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 0.88rem;
+  transition: border-color 0.2s, background 0.2s;
+}
+.ota-radio-label:has(input:checked) {
+  border-color: var(--primary);
+  background: rgba(54, 211, 153, 0.12);
+  color: var(--primary);
+  font-weight: 600;
+}
+.ota-radio-label input {
+  accent-color: var(--primary);
+}
+
 @media (max-width: 480px) {
   .input-row { align-items: stretch; }
   .input-row .button { padding-inline: 11px; }
