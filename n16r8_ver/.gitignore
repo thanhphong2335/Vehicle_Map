@@ -8,3 +8,6 @@
 data/env.js
 *.env
 doc_env
+
+# Local onboarding docs
+docs/

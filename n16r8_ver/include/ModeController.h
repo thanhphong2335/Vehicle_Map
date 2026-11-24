@@ -1,6 +1,7 @@
 #pragma once
 
 #include <Arduino.h>
+#include <atomic>
 
 #include "MotoMapTypes.h"
 
@@ -18,5 +19,5 @@ public:
 
 private:
     DisplayManager* _display;
-    DeviceMode _mode = DeviceMode::Idle;
+    std::atomic<DeviceMode> _mode{DeviceMode::Idle};
 };

@@ -7,8 +7,11 @@
 #include <WiFi.h>
 #include <ArduinoOTA.h>
 #include <Update.h>
+#include <ctime>
+#include <esp_heap_caps.h>
 #include <esp_ota_ops.h>
 #include <esp_partition.h>
+#include <esp_task_wdt.h>
 
 #include "DisplayManager.h"
 #include "GpsManager.h"
@@ -19,6 +22,7 @@
 #include "ImuManager.h"
 #include "LedManager.h"
 #include "SettingsStore.h"
+#include "SyncGuards.h"
 #if defined(MOTOMAP_NAV_MAP)
 #include "NavigationMapManager.h"
 #endif
@@ -29,6 +33,9 @@ constexpr char kApPassword[] = "motomap123";
 constexpr char kMdnsName[] = "motomap";
 constexpr uint32_t kStationTimeoutMs = 20000;
 constexpr uint32_t kReconnectDelaysMs[] = {5000, 15000, 30000};
+constexpr uint32_t kWebTaskStack = 8192;
+constexpr UBaseType_t kWebTaskPriority = 2;
+constexpr BaseType_t kWebTaskCore = 0;
 
 bool parseBody(WebServer& server, JsonDocument& document, String& error) {
     if (!server.hasArg("plain") || server.arg("plain").length() == 0) {
@@ -63,9 +70,44 @@ ConnectionManager::ConnectionManager(DisplayManager* display,
       _alertManager(alertManager),
       _imu(imu) {}
 
+ConnectionManager::~ConnectionManager() {
+    freeTestImageUploadBuffer();
+    if (_webTaskHandle != nullptr) {
+        vTaskDelete(_webTaskHandle);
+        _webTaskHandle = nullptr;
+    }
+    if (_netMutex != nullptr) {
+        vSemaphoreDelete(_netMutex);
+        _netMutex = nullptr;
+    }
+}
+
+void ConnectionManager::freeTestImageUploadBuffer() {
+    if (_testImageUploadBuf != nullptr) {
+        free(_testImageUploadBuf);
+        _testImageUploadBuf = nullptr;
+    }
+    _testImageUploadLen = 0;
+}
+
+void ConnectionManager::remountFsIfNeeded() {
+    if (!_otaFsUnmounted) return;
+    FsLock fsLock(pdMS_TO_TICKS(2000));
+    if (fsLock.locked() && LittleFS.begin(true)) {
+        _otaFsUnmounted = false;
+        Serial.println("[OTA] LittleFS remounted after aborted/failed filesystem OTA.");
+    }
+}
+
 void ConnectionManager::begin() {
-    if (!LittleFS.begin(true)) {
-        Serial.println("LittleFS mount failed in ConnectionManager");
+    if (_netMutex == nullptr) {
+        _netMutex = xSemaphoreCreateRecursiveMutex();
+    }
+    {
+        FsLock fsLock;
+        if (!fsLock.locked() || !LittleFS.begin(true)) {
+            Serial.println("LittleFS mount failed in ConnectionManager");
+        }
     }
     configureRoutes();
 
@@ -79,46 +121,83 @@ void ConnectionManager::begin() {
     }
 
     // Start the HTTP server only after WiFi has initialized the TCP/IP stack.
-    // Starting WebServer before WiFi.mode()/WiFi.begin() can trigger an
-    // lwIP "Invalid mbox" assertion on ESP32.
     _server.begin();
 
     // Setup ArduinoOTA for direct IDE/PlatformIO flashing over Wi-Fi
     ArduinoOTA.setHostname("motomap-esp32");
     ArduinoOTA.onStart([this]() {
+        OtaGuard::setActive(true);
         String type = (ArduinoOTA.getCommand() == U_FLASH) ? "sketch" : "filesystem";
         if (ArduinoOTA.getCommand() == U_SPIFFS) {
+            FsLock fsLock;
             LittleFS.end();
+            _otaFsUnmounted = true;
         }
         Serial.printf("[ArduinoOTA] Start updating %s\n", type.c_str());
-        if (_display != nullptr) {
-            _display->showStatus("ARDUINO OTA", type, TFT_MAGENTA);
-        }
+        UiActionQueue::pushStatus("ARDUINO OTA", type.c_str(), TFT_MAGENTA);
         if (_led != nullptr) {
             _led->setPattern(LedPattern::PoliceStrobe, 0xFF00FF);
         }
     });
     ArduinoOTA.onEnd([this]() {
+        _otaFsUnmounted = false;
         Serial.println("\n[ArduinoOTA] Update complete. Rebooting...");
-        if (_display != nullptr) {
-            _display->showStatus("OTA SUCCESS", "Rebooting...", TFT_GREEN);
-        }
+        UiActionQueue::pushStatus("OTA SUCCESS", "Rebooting...", TFT_GREEN);
         if (_led != nullptr) {
             _led->setPattern(LedPattern::Solid, 0x00FF00);
         }
     });
     ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
+        esp_task_wdt_reset();
         if (total > 0) {
-            Serial.printf("[ArduinoOTA] Progress: %u%%\r", (progress / (total / 100)));
+            const unsigned int pct = static_cast<unsigned int>((static_cast<uint64_t>(progress) * 100ULL) / total);
+            Serial.printf("[ArduinoOTA] Progress: %u%%\r", pct);
         }
     });
     ArduinoOTA.onError([this](ota_error_t error) {
+        OtaGuard::setActive(false);
+        remountFsIfNeeded();
         Serial.printf("[ArduinoOTA] Error[%u]\n", error);
-        if (_display != nullptr) {
-            _display->showStatus("OTA ERROR", String("Code: ") + String(error), TFT_RED);
-        }
+        char errBuf[24];
+        snprintf(errBuf, sizeof(errBuf), "Code: %u", static_cast<unsigned>(error));
+        UiActionQueue::pushStatus("OTA ERROR", errBuf, TFT_RED);
     });
     ArduinoOTA.begin();
+
+    if (_webTaskHandle == nullptr) {
+        const BaseType_t created = xTaskCreatePinnedToCore(
+            webTaskThunk,
+            "WebOtaTask",
+            kWebTaskStack,
+            this,
+            kWebTaskPriority,
+            &_webTaskHandle,
+            kWebTaskCore);
+        if (created == pdPASS) {
+            Serial.println("[NET] WebOtaTask started on Core 0.");
+        } else {
+            Serial.println("[NET] ERROR: Failed to spawn WebOtaTask!");
+        }
+    }
+}
+
+void ConnectionManager::webTaskThunk(void* parameter) {
+    auto* self = static_cast<ConnectionManager*>(parameter);
+    self->webTaskLoop();
+}
+
+void ConnectionManager::webTaskLoop() {
+    esp_task_wdt_add(nullptr);
+    for (;;) {
+        esp_task_wdt_reset();
+        if (_dnsStarted) {
+            _dnsServer.processNextRequest();
+        }
+        _server.handleClient();
+        ArduinoOTA.handle();
+        updateNetwork();
+        vTaskDelay(pdMS_TO_TICKS(5));
+    }
 }
 
 void ConnectionManager::startStation() {
@@ -149,7 +228,8 @@ void ConnectionManager::startStation() {
     Serial.printf("Connecting to WiFi: %s\n", _stationSsid.c_str());
     DEBUG_LOG("WIFI", "WiFi.begin initiated. Timeout in %u ms.", kStationTimeoutMs);
     if (_display != nullptr && !navigationActive() && (_media == nullptr || !_media->hasTestImage())) {
-        _display->showIdle(String("Connecting ") + _stationSsid);
+        const String msg = String("Connecting ") + _stationSsid;
+        UiActionQueue::pushIdle(msg.c_str());
     }
 }
 
@@ -204,11 +284,13 @@ void ConnectionManager::stopDnsServer() {
 }
 
 void ConnectionManager::handleStationConnected() {
-    // Keep SoftAP running concurrently (WIFI_AP_STA) so the user can always connect
-    // to MotoMap-ESP32 (192.168.4.1) to change Wi-Fi credentials or settings at any time!
+    // Keep SoftAP running concurrently (WIFI_AP_STA)
     WiFi.mode(WIFI_AP_STA);
     WiFi.softAP(kApSsid, kApPassword);
     startDnsServer();
+
+    // Trigger non-blocking SNTP time sync for TLS certificate verification & timestamps
+    configTime(7 * 3600, 0, "pool.ntp.org", "time.google.com");
 
     _networkState = NetworkState::Station;
     _connectionStartedMs = millis();
@@ -235,23 +317,17 @@ void ConnectionManager::handleStationConnected() {
               _display, navAct ? 1 : 0, routeState, testImg ? 1 : 0, savedImg ? 1 : 0);
 
     if (_display != nullptr) {
-        // Only suppress showIdle if actively guiding turn-by-turn driving (Navigating or OffRoute).
-        // If state is Idle or WaitingGps, show the QR code so the user can connect to the webserver!
-        const bool activelyGuiding = _route != nullptr &&
-                                    (_route->state() == RouteState::Navigating ||
-                                     _route->state() == RouteState::OffRoute);
+        const RouteState currentRs = _route != nullptr ? _route->state() : RouteState::Idle;
+        const bool activelyGuiding = (currentRs == RouteState::Navigating || currentRs == RouteState::OffRoute);
         if (activelyGuiding) {
             DEBUG_LOG("DISPLAY", "Suppressed showIdle because active turn-by-turn driving guidance is in progress.");
         } else if (testImg) {
             DEBUG_LOG("DISPLAY", "Suppressed showIdle because test image is active.");
         } else {
             const String qrUrl = String("http://") + ip.toString() + "/";
-            DEBUG_LOG("DISPLAY", "Triggering _display->showIdle('%s')...", qrUrl.c_str());
-            _display->showIdle(qrUrl);
-            DEBUG_LOG("DISPLAY", "_display->showIdle completed.");
+            DEBUG_LOG("DISPLAY", "Queuing showIdle('%s')...", qrUrl.c_str());
+            UiActionQueue::pushIdle(qrUrl.c_str());
         }
-    } else {
-        DEBUG_LOG("DISPLAY", "ERROR: _display is null!");
     }
 }
 
@@ -260,10 +336,8 @@ void ConnectionManager::handleStationDisconnected() {
 
     DEBUG_LOG("WIFI", "handleStationDisconnected: Reverting screen to standby/waiting mode...");
 
-    // Only suppress reverting if actively guiding turn-by-turn driving (Navigating or OffRoute)
-    const bool activelyGuiding = _route != nullptr &&
-                                (_route->state() == RouteState::Navigating ||
-                                 _route->state() == RouteState::OffRoute);
+    const RouteState currentRs = _route != nullptr ? _route->state() : RouteState::Idle;
+    const bool activelyGuiding = (currentRs == RouteState::Navigating || currentRs == RouteState::OffRoute);
     if (activelyGuiding) {
         DEBUG_LOG("DISPLAY", "Suppressed standby screen because active navigation is in progress.");
         return;
@@ -274,23 +348,16 @@ void ConnectionManager::handleStationDisconnected() {
         return;
     }
 
-    // 1. If user has a saved custom image, restore it (same behavior as on boot in main.cpp)
     if (_media != nullptr && _media->hasSavedImage()) {
-        DEBUG_LOG("DISPLAY", "Station disconnected -> Restoring saved user image.");
-        _media->showSavedImage();
-        if (_modeController != nullptr) {
-            _modeController->onMedia(false);
-        }
+        DEBUG_LOG("DISPLAY", "Station disconnected -> Restoring saved user image on Core 1.");
+        UiAction action{};
+        action.type = UiActionType::ShowSavedImage;
+        UiActionQueue::push(action);
         return;
     }
 
-    // 2. Otherwise revert to initial idle / AP standby screen (setup_background.jpg without QR code)
-    DEBUG_LOG("DISPLAY", "Station disconnected -> Reverting to initial standby screen.");
-    if (_modeController != nullptr) {
-        _modeController->onIdle("Waiting for iPhone");
-    } else if (_display != nullptr) {
-        _display->showIdle("Waiting for iPhone");
-    }
+    DEBUG_LOG("DISPLAY", "Station disconnected -> Queuing initial standby screen.");
+    UiActionQueue::pushIdle("Waiting for iPhone");
 }
 
 void ConnectionManager::scheduleStationSwitch(uint32_t delayMs) {
@@ -348,8 +415,12 @@ void ConnectionManager::updateNetwork() {
         _reconnectAttempt = 0;
         handleStationDisconnected();
     } else if (_display != nullptr && _display->isShowingQr()) {
-        DEBUG_LOG("WIFI", "Wi-Fi is not connected but QR code is visible -> Reverting to standby!");
-        handleStationDisconnected();
+        static uint32_t sLastQrRevertMs = 0;
+        if (now - sLastQrRevertMs >= 500) {
+            sLastQrRevertMs = now;
+            DEBUG_LOG("WIFI", "Wi-Fi is not connected but QR code is visible -> Reverting to standby!");
+            handleStationDisconnected();
+        }
     }
 
     if (_networkState == NetworkState::Connecting) {
@@ -408,7 +479,12 @@ void ConnectionManager::configureRoutes() {
     _server.on("/", HTTP_GET, [this]() { serveFile("/index.html", "text/html; charset=utf-8"); });
     _server.on("/index.html", HTTP_GET, [this]() { serveFile("/index.html", "text/html; charset=utf-8"); });
     _server.on("/env.js", HTTP_GET, [this]() {
-        if (!LittleFS.exists("/env.js")) {
+        bool envExists = false;
+        {
+            FsLock fsLock(pdMS_TO_TICKS(500));
+            envExists = fsLock.locked() && LittleFS.exists("/env.js");
+        }
+        if (!envExists) {
             _server.send(200, "application/javascript; charset=utf-8", "window.MOTOMAP_ENV={};");
             return;
         }
@@ -445,12 +521,15 @@ void ConnectionManager::configureRoutes() {
             sendError("navigation_has_priority", 409);
             return;
         }
-        if (_modeController != nullptr) _modeController->onMedia();
+        UiAction action{};
+        action.type = UiActionType::EnterMediaMode;
+        action.flag = true;
+        UiActionQueue::push(action);
         sendJson("{\"ok\":true,\"mode\":\"MEDIA\"}");
     });
     _server.on("/mode/idle", HTTP_POST, [this]() {
         if (_media != nullptr) _media->clearTestImage();
-        if (_modeController != nullptr) _modeController->onIdle();
+        UiActionQueue::pushIdle("Waiting for iPhone");
         sendJson("{\"ok\":true,\"mode\":\"IDLE\"}");
     });
     _server.on("/media/frame", HTTP_POST, [this]() {
@@ -463,7 +542,7 @@ void ConnectionManager::configureRoutes() {
             return;
         }
         const String& body = _server.arg("plain");
-        const bool ok = _media != nullptr && _media->handleJpeg(
+        const bool ok = _media != nullptr && _media->queueStreamJpeg(
             reinterpret_cast<const uint8_t*>(body.c_str()), body.length());
         if (ok) sendJson("{\"ok\":true}");
         else sendError("invalid_jpeg", 400);
@@ -545,10 +624,24 @@ void ConnectionManager::configureRoutes() {
 }
 
 void ConnectionManager::handleStatus() {
+    size_t fsTotal = 0;
+    size_t fsUsed = 0;
+    {
+        FsLock fsLock(pdMS_TO_TICKS(500));
+        if (fsLock.locked()) {
+            fsTotal = LittleFS.totalBytes();
+            fsUsed = LittleFS.usedBytes();
+        }
+    }
+
     JsonDocument document;
     document["device"] = "MotoMap-ESP32";
     document["mode"] = _modeController != nullptr ? modeName(_modeController->mode()) : "UNKNOWN";
-    document["route_state"] = _route != nullptr ? routeStateName(_route->state()) : "UNKNOWN";
+    RouteManager::StatusSnapshot routeSnap;
+    if (_route != nullptr) {
+        _route->getStatusSnapshot(routeSnap);
+    }
+    document["route_state"] = _route != nullptr ? routeStateName(routeSnap.state) : "UNKNOWN";
     document["network_state"] = networkStateName();
     document["internet_connected"] = internetConnected();
     document["ip"] = internetConnected() ? WiFi.localIP().toString() : WiFi.softAPIP().toString();
@@ -556,8 +649,8 @@ void ConnectionManager::handleStatus() {
     document["rssi"] = internetConnected() ? WiFi.RSSI() : 0;
     document["uptime_ms"] = millis();
     document["heap_free"] = ESP.getFreeHeap();
-    document["littlefs_total"] = LittleFS.totalBytes();
-    document["littlefs_used"] = LittleFS.usedBytes();
+    document["littlefs_total"] = fsTotal;
+    document["littlefs_used"] = fsUsed;
     document["display_width"] = _display != nullptr ? _display->width() : 0;
     document["display_height"] = _display != nullptr ? _display->height() : 0;
 
@@ -576,7 +669,7 @@ void ConnectionManager::handleStatus() {
         jsonGps["source"] = gps.valid ? "NEO_6M" : "WAITING";
     }
     if (_route != nullptr) {
-        const DestinationData& destination = _route->destination();
+        const DestinationData& destination = routeSnap.destination;
         JsonObject jsonDestination = document["destination"].to<JsonObject>();
         jsonDestination["valid"] = destination.valid;
         jsonDestination["active"] = destination.active;
@@ -584,12 +677,12 @@ void ConnectionManager::handleStatus() {
         jsonDestination["lon"] = destination.longitude;
         jsonDestination["label"] = destination.label;
         jsonDestination["vehicle"] = destination.vehicle;
-        document["navigation_sequence"] = _route->sequence();
-        document["navigation_age_ms"] = _route->lastUpdateMillis() == 0
+        document["navigation_sequence"] = routeSnap.sequence;
+        document["navigation_age_ms"] = routeSnap.lastUpdateMs == 0
             ? 0
-            : millis() - _route->lastUpdateMillis();
-        document["route_error"] = _route->lastError();
-        const NavigationData& navigation = _route->currentNavigation();
+            : millis() - routeSnap.lastUpdateMs;
+        document["route_error"] = routeSnap.lastError;
+        const NavigationData& navigation = routeSnap.navigation;
         JsonObject jsonNavigation = document["navigation"].to<JsonObject>();
         jsonNavigation["maneuver"] = maneuverName(navigation.maneuver);
         jsonNavigation["distance_to_turn_m"] = navigation.distanceToTurnM;
@@ -599,13 +692,14 @@ void ConnectionManager::handleStatus() {
         jsonNavigation["status"] = navigation.statusMessage;
     }
     if (_media != nullptr) {
+        const MediaManager::MediaStats mStats = _media->statsSnapshot();
         JsonObject animation = document["animation"].to<JsonObject>();
-        animation["valid"] = _media->hasAnimation();
-        animation["frames"] = _media->animationFrameCount();
-        animation["fps"] = _media->animationFps();
-        animation["bytes"] = _media->animationBytes();
-        document["media_frames"] = _media->frameCount();
-        document["test_image_active"] = _media->hasTestImage();
+        animation["valid"] = mStats.animationValid;
+        animation["frames"] = mStats.animationFrames;
+        animation["fps"] = mStats.animationFps;
+        animation["bytes"] = mStats.animationBytes;
+        document["media_frames"] = mStats.streamFrameCount;
+        document["test_image_active"] = mStats.testImageActive;
     }
 
     String body;
@@ -712,42 +806,65 @@ void ConnectionManager::handleTestImage() {
         return;
     }
 
-    if (_modeController != nullptr) _modeController->onMedia(false);
+    UiAction action{};
+    action.type = UiActionType::EnterMediaMode;
+    action.flag = false;
+    UiActionQueue::push(action);
     sendJson("{\"ok\":true,\"display\":\"test_image\"}");
 }
 
 void ConnectionManager::handleTestImageUpload() {
+    constexpr size_t kMaxUploadBytes = 128U * 1024U;
     HTTPUpload& upload = _server.upload();
     if (upload.status == UPLOAD_FILE_START) {
-        _testImageUploadData = "";
-        _testImageUploadData.reserve(128U * 1024U);
+        freeTestImageUploadBuffer();
         _testImageUploadOk = !navigationActive();
         _testImageUploadError = _testImageUploadOk ? "" : "navigation_has_priority";
+        if (_testImageUploadOk) {
+            _testImageUploadBuf = static_cast<uint8_t*>(ps_malloc(kMaxUploadBytes));
+            if (_testImageUploadBuf == nullptr) {
+                _testImageUploadBuf = static_cast<uint8_t*>(malloc(kMaxUploadBytes));
+            }
+            if (_testImageUploadBuf == nullptr) {
+                _testImageUploadOk = false;
+                _testImageUploadError = "image_oom";
+            }
+        }
         return;
     }
-    if (!_testImageUploadOk) return;
     if (upload.status == UPLOAD_FILE_WRITE) {
-        if (_testImageUploadData.length() + upload.currentSize > 128U * 1024U) {
+        esp_task_wdt_reset();
+        if (!_testImageUploadOk || _testImageUploadBuf == nullptr) return;
+        if (_testImageUploadLen + upload.currentSize > kMaxUploadBytes) {
             _testImageUploadOk = false;
             _testImageUploadError = "jpeg_too_large";
             return;
         }
-        _testImageUploadData.concat(reinterpret_cast<const char*>(upload.buf), upload.currentSize);
+        memcpy(_testImageUploadBuf + _testImageUploadLen, upload.buf, upload.currentSize);
+        _testImageUploadLen += upload.currentSize;
         return;
     }
     if (upload.status == UPLOAD_FILE_END) {
-        _testImageUploadOk = _media != nullptr && _media->showTestImage(
-            reinterpret_cast<const uint8_t*>(_testImageUploadData.c_str()), _testImageUploadData.length());
-        if (!_testImageUploadOk && !_testImageUploadError.length()) {
-            _testImageUploadError = "jpeg_decode_failed";
+        if (_testImageUploadOk && _testImageUploadBuf != nullptr) {
+            _testImageUploadOk = _media != nullptr && _media->saveTestImageOnly(
+                _testImageUploadBuf, _testImageUploadLen);
+            if (!_testImageUploadOk && !_testImageUploadError.length()) {
+                _testImageUploadError = "jpeg_decode_failed";
+            }
         }
-        _testImageUploadData = "";
+        freeTestImageUploadBuffer();
+        return;
+    }
+    if (upload.status == UPLOAD_FILE_ABORTED) {
+        _testImageUploadOk = false;
+        _testImageUploadError = "image_upload_aborted";
+        freeTestImageUploadBuffer();
     }
 }
 
 void ConnectionManager::handleTestImageClear() {
     if (_media != nullptr) _media->clearTestImage();
-    if (_modeController != nullptr) _modeController->onIdle("Image test stopped");
+    UiActionQueue::pushIdle("Image test stopped");
     sendJson("{\"ok\":true}");
 }
 
@@ -791,6 +908,7 @@ void ConnectionManager::handleAnimationFrameUpload() {
         return;
     }
     if (upload.status == UPLOAD_FILE_WRITE) {
+        esp_task_wdt_reset();
         if (_uploadRequestOk) {
             _uploadRequestOk = _media->writeAnimationFrameChunk(
                 upload.buf, upload.currentSize, _uploadRequestError);
@@ -833,7 +951,7 @@ void ConnectionManager::handleAnimationDelete() {
         sendError(error.length() ? error : "animation_delete_failed", 500);
         return;
     }
-    if (_modeController != nullptr) _modeController->onIdle("Animation deleted");
+    UiActionQueue::pushIdle("Animation deleted");
     sendJson("{\"ok\":true}");
 }
 
@@ -854,6 +972,11 @@ void ConnectionManager::sendError(const String& error, int status) {
 }
 
 bool ConnectionManager::serveFile(const char* path, const char* contentType) {
+    FsLock fsLock(pdMS_TO_TICKS(2000));
+    if (!fsLock.locked()) {
+        sendError("fs_busy", 503);
+        return false;
+    }
     if (!LittleFS.exists(path)) {
         sendError("file_not_found", 404);
         return false;
@@ -872,12 +995,7 @@ bool ConnectionManager::serveFile(const char* path, const char* contentType) {
 }
 
 void ConnectionManager::loop() {
-    if (_dnsStarted) {
-        _dnsServer.processNextRequest();
-    }
-    _server.handleClient();
-    ArduinoOTA.handle();
-    updateNetwork();
+    // WebServer, Captive DNS, ArduinoOTA, and Wi-Fi state machine now run in Core 0 WebOtaTask.
 }
 
 void ConnectionManager::handleMapOfflineStats() {
@@ -886,14 +1004,23 @@ void ConnectionManager::handleMapOfflineStats() {
 #if defined(MOTOMAP_NAV_MAP)
     NavigationMapManager::getOfflineTileStats(count, totalBytes);
 #endif
+    size_t fsTotal = 0;
+    size_t fsUsed = 0;
+    {
+        FsLock fsLock(pdMS_TO_TICKS(1000));
+        if (fsLock.locked()) {
+            fsTotal = LittleFS.totalBytes();
+            fsUsed = LittleFS.usedBytes();
+        }
+    }
     JsonDocument doc;
     doc["ok"] = true;
     doc["tiles_count"] = count;
     doc["total_bytes"] = totalBytes;
     doc["total_kb"] = totalBytes / 1024;
-    doc["littlefs_total"] = LittleFS.totalBytes();
-    doc["littlefs_used"] = LittleFS.usedBytes();
-    doc["littlefs_free"] = LittleFS.totalBytes() - LittleFS.usedBytes();
+    doc["littlefs_total"] = fsTotal;
+    doc["littlefs_used"] = fsUsed;
+    doc["littlefs_free"] = fsTotal >= fsUsed ? (fsTotal - fsUsed) : 0;
     String body;
     serializeJson(doc, body);
     sendJson(body);
@@ -911,22 +1038,30 @@ void ConnectionManager::handleMapTileUpload() {
     if (upload.status == UPLOAD_FILE_START) {
         _uploadRequestOk = true;
         _uploadRequestError = "";
-        const uint8_t z = static_cast<uint8_t>(_server.arg("z").toInt());
-        const int32_t x = static_cast<int32_t>(_server.arg("x").toInt());
-        const int32_t y = static_cast<int32_t>(_server.arg("y").toInt());
+        const int32_t z = _server.arg("z").toInt();
+        const int32_t x = _server.arg("x").toInt();
+        const int32_t y = _server.arg("y").toInt();
 
-        if (z == 0 || !_server.hasArg("z") || !_server.hasArg("x") || !_server.hasArg("y")) {
+        if (!_server.hasArg("z") || !_server.hasArg("x") || !_server.hasArg("y") ||
+            z < 1 || z > 19 || x < 0 || y < 0) {
             _uploadRequestOk = false;
-            _uploadRequestError = "missing_tile_coordinates";
+            _uploadRequestError = "invalid_tile_coordinates";
             return;
         }
 
+        FsLock fsLock(pdMS_TO_TICKS(1500));
+        if (!fsLock.locked()) {
+            _uploadRequestOk = false;
+            _uploadRequestError = "fs_busy";
+            return;
+        }
         if (!LittleFS.exists("/tiles")) {
             LittleFS.mkdir("/tiles");
         }
 
         char path[32];
-        snprintf(path, sizeof(path), "/tiles/%u_%ld_%ld.png", z, static_cast<long>(x), static_cast<long>(y));
+        snprintf(path, sizeof(path), "/tiles/%ld_%ld_%ld.png",
+                 static_cast<long>(z), static_cast<long>(x), static_cast<long>(y));
         if (_tileUploadFile) _tileUploadFile.close();
         _tileUploadFile = LittleFS.open(path, "w");
         if (!_tileUploadFile) {
@@ -937,16 +1072,19 @@ void ConnectionManager::handleMapTileUpload() {
     }
 
     if (upload.status == UPLOAD_FILE_WRITE) {
+        esp_task_wdt_reset();
         if (_uploadRequestOk && _tileUploadFile) {
-            if (_tileUploadFile.write(upload.buf, upload.currentSize) != upload.currentSize) {
+            FsLock fsLock(pdMS_TO_TICKS(1500));
+            if (!fsLock.locked() || _tileUploadFile.write(upload.buf, upload.currentSize) != upload.currentSize) {
                 _uploadRequestOk = false;
-                _uploadRequestError = "tile_write_failed";
+                _uploadRequestError = fsLock.locked() ? "tile_write_failed" : "fs_busy";
             }
         }
         return;
     }
 
     if (upload.status == UPLOAD_FILE_END) {
+        FsLock fsLock(pdMS_TO_TICKS(1500));
         if (_tileUploadFile) {
             _tileUploadFile.close();
         }
@@ -956,6 +1094,7 @@ void ConnectionManager::handleMapTileUpload() {
     if (upload.status == UPLOAD_FILE_ABORTED) {
         _uploadRequestOk = false;
         _uploadRequestError = "tile_upload_aborted";
+        FsLock fsLock(pdMS_TO_TICKS(1500));
         if (_tileUploadFile) {
             _tileUploadFile.close();
         }
@@ -1136,6 +1275,16 @@ void ConnectionManager::handleOtaInfo() {
     const esp_partition_t* running = esp_ota_get_running_partition();
     const esp_partition_t* next = esp_ota_get_next_update_partition(nullptr);
 
+    size_t fsTotal = 0;
+    size_t fsUsed = 0;
+    {
+        FsLock fsLock(pdMS_TO_TICKS(500));
+        if (fsLock.locked()) {
+            fsTotal = LittleFS.totalBytes();
+            fsUsed = LittleFS.usedBytes();
+        }
+    }
+
     JsonDocument doc;
     doc["ok"] = true;
     doc["running_partition"] = running ? running->label : "unknown";
@@ -1147,9 +1296,11 @@ void ConnectionManager::handleOtaInfo() {
     doc["chip_revision"] = ESP.getChipRevision();
     doc["cpu_freq_mhz"] = ESP.getCpuFreqMHz();
     doc["free_heap"] = ESP.getFreeHeap();
+    doc["internal_free_heap"] = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
     doc["free_psram"] = ESP.getFreePsram();
-    doc["littlefs_total"] = LittleFS.totalBytes();
-    doc["littlefs_used"] = LittleFS.usedBytes();
+    doc["littlefs_total"] = fsTotal;
+    doc["littlefs_used"] = fsUsed;
+    doc["sntp_synced"] = (std::time(nullptr) >= 1700000000);
 
     String response;
     serializeJson(doc, response);
@@ -1159,20 +1310,18 @@ void ConnectionManager::handleOtaInfo() {
 void ConnectionManager::handleOtaUpdateDone() {
     _server.sendHeader("Connection", "close");
     if (Update.hasError()) {
+        OtaGuard::setActive(false);
+        remountFsIfNeeded();
         String err = String("OTA Update failed: ") + Update.errorString();
         Serial.printf("[OTA] %s\n", err.c_str());
-        if (_display != nullptr) {
-            _display->showStatus("OTA ERROR", Update.errorString(), TFT_RED);
-        }
+        UiActionQueue::pushStatus("OTA ERROR", Update.errorString(), TFT_RED);
         if (_led != nullptr) {
             _led->setPattern(LedPattern::PoliceStrobe, 0xFF0000);
         }
         sendError(err, 500);
     } else {
         Serial.println("[OTA] Update completed successfully! Rebooting in 1s...");
-        if (_display != nullptr) {
-            _display->showStatus("UPDATE SUCCESS", "Rebooting...", TFT_GREEN);
-        }
+        UiActionQueue::pushStatus("UPDATE SUCCESS", "Rebooting...", TFT_GREEN);
         if (_led != nullptr) {
             _led->setPattern(LedPattern::Solid, 0x00FF00);
         }
@@ -1186,6 +1335,7 @@ void ConnectionManager::handleOtaUpdateDone() {
 void ConnectionManager::handleOtaUploadProgress() {
     HTTPUpload& upload = _server.upload();
     if (upload.status == UPLOAD_FILE_START) {
+        OtaGuard::setActive(true);
         _otaInProgress = true;
         _otaWrittenBytes = 0;
         _otaError = "";
@@ -1203,12 +1353,14 @@ void ConnectionManager::handleOtaUploadProgress() {
         Serial.printf("[OTA] Starting %s update. Filename: %s\n", typeName, upload.filename.c_str());
 
         if (cmd == U_SPIFFS) {
+            FsLock fsLock;
             LittleFS.end();
+            _otaFsUnmounted = true;
         }
 
-        if (_display != nullptr) {
-            _display->showStatus("OTA UPDATING", String("Flashing ") + typeName, TFT_MAGENTA);
-        }
+        char detail[48];
+        snprintf(detail, sizeof(detail), "Flashing %s", typeName);
+        UiActionQueue::pushStatus("OTA UPDATING", detail, TFT_MAGENTA);
         if (_led != nullptr) {
             _led->setPattern(LedPattern::PoliceStrobe, 0xFF00FF);
         }
@@ -1216,8 +1368,11 @@ void ConnectionManager::handleOtaUploadProgress() {
         if (!Update.begin(UPDATE_SIZE_UNKNOWN, cmd)) {
             Update.printError(Serial);
             _otaError = Update.errorString();
+            OtaGuard::setActive(false);
+            remountFsIfNeeded();
         }
     } else if (upload.status == UPLOAD_FILE_WRITE) {
+        esp_task_wdt_reset();
         _otaWrittenBytes += upload.currentSize;
         if (Update.write(upload.buf, upload.currentSize) != upload.currentSize) {
             Update.printError(Serial);
@@ -1225,15 +1380,20 @@ void ConnectionManager::handleOtaUploadProgress() {
         }
     } else if (upload.status == UPLOAD_FILE_END) {
         if (Update.end(true)) {
+            _otaFsUnmounted = false;
             Serial.printf("[OTA] Update Success: %u bytes\n", _otaWrittenBytes);
         } else {
             Update.printError(Serial);
             _otaError = Update.errorString();
+            OtaGuard::setActive(false);
+            remountFsIfNeeded();
         }
         _otaInProgress = false;
     } else if (upload.status == UPLOAD_FILE_ABORTED) {
         Update.abort();
         _otaInProgress = false;
+        OtaGuard::setActive(false);
+        remountFsIfNeeded();
         Serial.println("[OTA] Update was aborted.");
     }
 }

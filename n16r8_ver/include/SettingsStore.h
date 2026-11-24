@@ -1,6 +1,8 @@
 #pragma once
 
 #include <Arduino.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
 
 #include "MotoMapTypes.h"
 
@@ -18,4 +20,7 @@ public:
 
     bool loadAlertConfig(AlertConfig& config) const;
     bool saveAlertConfig(const AlertConfig& config);
+
+private:
+    mutable SemaphoreHandle_t _mutex = nullptr;
 };

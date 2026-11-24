@@ -2,6 +2,7 @@
 
 #include <Wire.h>
 #include <cmath>
+#include <esp_task_wdt.h>
 
 #include "AlertManager.h"
 #include "GpsManager.h"
@@ -19,12 +20,12 @@ constexpr uint8_t REG_WHO_AM_I = 0x75;
 constexpr float ACCEL_LSB_PER_G = 4096.0f;
 constexpr float GYRO_LSB_PER_DEG = 65.5f;
 constexpr float G_TO_MS2 = 9.80665f;
-constexpr TickType_t SAMPLE_INTERVAL = pdMS_TO_TICKS(200); // 200ms sampling rate
+constexpr TickType_t SAMPLE_INTERVAL = pdMS_TO_TICKS(20); // 50 Hz sampling matches DLPF ~20 Hz (Nyquist safe)
 
 constexpr uint32_t kTaskStackSize = 4096;
-constexpr UBaseType_t kTaskPriority = 2;
+constexpr UBaseType_t kTaskPriority = 3;
 constexpr BaseType_t kTaskCore = 0; // Pinned to Core 0 to prevent UI lag on Core 1
-}
+} // namespace
 
 ImuManager::ImuManager(AlertManager* alertManager, GpsManager* gps)
     : _alertManager(alertManager), _gps(gps) {}
@@ -64,7 +65,7 @@ bool ImuManager::begin() {
         return false;
     }
 
-    Serial.println("[IMU] Background task initialized on Core 0.");
+    Serial.println("[IMU] Background task initialized on Core 0 (50 Hz Complementary Filter).");
     return true;
 }
 
@@ -93,6 +94,7 @@ bool ImuManager::initHardware() {
 
     if (_whoAmI == 0xFF || _whoAmI == 0x00) {
         Serial.println("[IMU] WARNING: Sensor not detected or invalid address.");
+        _sensorReady.store(false, std::memory_order_release);
         return false;
     }
 
@@ -107,7 +109,9 @@ bool ImuManager::initHardware() {
     // Low pass filter DLPF ~20Hz
     writeReg(REG_CONFIG, 0x04);
 
-    _sensorReady = true;
+    _angleFilter.reset();
+    _lastSampleUs = micros();
+    _sensorReady.store(true, std::memory_order_release);
     Serial.println("[IMU] Sensor hardware initialized successfully.");
     return true;
 }
@@ -118,15 +122,17 @@ void ImuManager::taskTrampoline(void* param) {
 }
 
 void ImuManager::runTask() {
+    esp_task_wdt_add(nullptr);
     initHardware();
 
     TickType_t lastWakeTime = xTaskGetTickCount();
     uint32_t lastRetryAttemptMs = 0;
 
     for (;;) {
+        esp_task_wdt_reset();
         const uint32_t now = millis();
 
-        if (!_sensorReady) {
+        if (!_sensorReady.load(std::memory_order_acquire)) {
             if (now - lastRetryAttemptMs >= 3000) {
                 lastRetryAttemptMs = now;
                 initHardware();
@@ -141,7 +147,7 @@ void ImuManager::runTask() {
 
         if (err != 0 || Wire.requestFrom(static_cast<uint8_t>(MPU_ADDR), static_cast<uint8_t>(14)) != 14) {
             Serial.println("[IMU] Read error on I2C bus.");
-            _sensorReady = false;
+            _sensorReady.store(false, std::memory_order_release);
             if (xSemaphoreTake(_mutex, pdMS_TO_TICKS(20)) == pdTRUE) {
                 _latestData.valid = false;
                 xSemaphoreGive(_mutex);
@@ -168,12 +174,16 @@ void ImuManager::runTask() {
         data.gy = (static_cast<float>(raw[5]) / GYRO_LSB_PER_DEG) * DEG_TO_RAD;
         data.gz = (static_cast<float>(raw[6]) / GYRO_LSB_PER_DEG) * DEG_TO_RAD;
 
-        // Calculate Roll and Pitch angles in degrees
-        data.roll = atan2f(data.ay, data.az) * RAD_TO_DEG;
-        data.pitch = atan2f(-data.ax, hypotf(data.ay, data.az)) * RAD_TO_DEG;
+        const uint32_t nowUs = micros();
+        const float dtSec = (_lastSampleUs == 0)
+            ? 0.02F
+            : static_cast<float>(nowUs - _lastSampleUs) / 1000000.0F;
+        _lastSampleUs = nowUs;
+
+        _angleFilter.update(data.ax, data.ay, data.az, data.gx, data.gy, data.gz, dtSec, data.roll, data.pitch);
         data.valid = true;
 
-        // Evaluate fall conditions
+        // Evaluate fall conditions under mutex
         evaluateFall(data, now);
 
         if (xSemaphoreTake(_mutex, pdMS_TO_TICKS(20)) == pdTRUE) {
@@ -186,75 +196,44 @@ void ImuManager::runTask() {
 }
 
 void ImuManager::evaluateFall(ImuData& current, uint32_t now) {
-    const bool exceeded = (fabsf(current.roll) > kFallAngleDeg || fabsf(current.pitch) > kFallAngleDeg);
-
-    if (_fallDismissed) {
-        // Alert dismissed manually: wait until vehicle is righted before resetting
-        if (fabsf(current.roll) < kClearAngleDeg && fabsf(current.pitch) < kClearAngleDeg) {
-            if (_clearStartMs == 0) _clearStartMs = now;
-            if (now - _clearStartMs >= kClearHoldMs) {
-                _fallDismissed = false;
-                _alertDispatched = false;
-                _fallAlertActive = false;
-                _fallStartMs = 0;
-                _clearStartMs = 0;
-            }
-        } else {
-            _clearStartMs = 0;
+    bool shouldDispatch = false;
+    {
+        if (xSemaphoreTake(_mutex, pdMS_TO_TICKS(20)) != pdTRUE) {
+            return;
         }
-    } else if (!_fallAlertActive) {
-        if (exceeded) {
-            if (_fallStartMs == 0) _fallStartMs = now;
-            const uint32_t duration = now - _fallStartMs;
-            current.fallDurationMs = duration;
+        const NavMath::FallStepResult step = _fallFsm.update(current.roll, current.pitch, now);
+        current.fallDetected = step.fallActive;
+        current.fallDurationMs = step.tiltDurationMs;
+        _fallAlertActive.store(step.fallActive, std::memory_order_release);
 
-            if (duration >= kFallHoldMs) {
-                _fallAlertActive = true;
-                current.fallDetected = true;
-                Serial.printf("[IMU] FALL DETECTED! Roll: %.1f deg, Pitch: %.1f deg\n", current.roll, current.pitch);
-
-                // Dispatch automated alert to emergency worker
-                if (!_alertDispatched && _alertManager != nullptr) {
-                    _alertDispatched = true;
-                    AlertEvent event{};
-                    snprintf(event.event, sizeof(event.event), "Fall Detected (Roll: %.0f deg)", current.roll);
-
-                    if (_gps != nullptr) {
-                        const GpsSnapshot gps = _gps->snapshot();
-                        if (gps.valid) {
-                            event.latitude = gps.latitude;
-                            event.longitude = gps.longitude;
-                            event.speedKmh = gps.speedKmh;
-                            event.courseDeg = gps.courseDeg;
-                        }
-                    }
-                    snprintf(event.status, sizeof(event.status), "Auto-Triggered by IMU");
-                    _alertManager->triggerAlert(event);
-                }
-            }
-        } else {
-            _fallStartMs = 0;
-            current.fallDurationMs = 0;
-        }
-    } else {
-        // Alert currently active
-        current.fallDetected = true;
-        current.fallDurationMs = now - _fallStartMs;
-
-        // Check if vehicle has returned to upright position
-        if (fabsf(current.roll) < kClearAngleDeg && fabsf(current.pitch) < kClearAngleDeg) {
-            if (_clearStartMs == 0) _clearStartMs = now;
-            if (now - _clearStartMs >= kClearHoldMs) {
-                _fallAlertActive = false;
-                _alertDispatched = false;
-                _fallStartMs = 0;
-                _clearStartMs = 0;
-                current.fallDetected = false;
+        if (step.newlyConfirmed && !_alertDispatched) {
+            _alertDispatched = true;
+            shouldDispatch = true;
+            Serial.printf("[IMU] FALL DETECTED! Roll: %.1f deg, Pitch: %.1f deg\n", current.roll, current.pitch);
+        } else if (step.newlyCleared || _fallFsm.state() == NavMath::FallState::Upright) {
+            if (step.newlyCleared) {
                 Serial.println("[IMU] Vehicle righted. Fall alert cleared.");
             }
-        } else {
-            _clearStartMs = 0;
+            _alertDispatched = false;
         }
+        xSemaphoreGive(_mutex);
+    }
+
+    if (shouldDispatch && _alertManager != nullptr) {
+        AlertEvent event{};
+        snprintf(event.event, sizeof(event.event), "Fall Detected (Roll: %.0f deg)", current.roll);
+
+        if (_gps != nullptr) {
+            const GpsSnapshot gps = _gps->snapshot(); // Thread-safe GPS snapshot
+            if (gps.valid) {
+                event.latitude = gps.latitude;
+                event.longitude = gps.longitude;
+                event.speedKmh = gps.speedKmh;
+                event.courseDeg = gps.courseDeg;
+            }
+        }
+        snprintf(event.status, sizeof(event.status), "Auto-Triggered by IMU");
+        _alertManager->triggerAlert(event);
     }
 }
 
@@ -269,17 +248,22 @@ bool ImuManager::getData(ImuData& outData) const {
 }
 
 bool ImuManager::isFallDetected() const {
-    return _fallAlertActive;
+    return _fallAlertActive.load(std::memory_order_acquire);
 }
 
 bool ImuManager::isSensorConnected() const {
-    return _sensorReady;
+    return _sensorReady.load(std::memory_order_acquire);
 }
 
 void ImuManager::clearFallAlert() {
-    _fallAlertActive = false;
-    _fallDismissed = true;
-    _fallStartMs = 0;
-    _clearStartMs = 0;
+    if (_mutex != nullptr && xSemaphoreTake(_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+        _fallFsm.dismiss();
+        _fallAlertActive.store(false, std::memory_order_release);
+        _latestData.fallDetected = false;
+        _latestData.fallDurationMs = 0;
+        xSemaphoreGive(_mutex);
+    } else {
+        _fallAlertActive.store(false, std::memory_order_release);
+    }
     Serial.println("[IMU] User manually cleared fall alert.");
 }

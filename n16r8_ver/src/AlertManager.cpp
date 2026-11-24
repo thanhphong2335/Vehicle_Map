@@ -2,16 +2,23 @@
 
 #include <ArduinoJson.h>
 #include <HTTPClient.h>
+#include <LittleFS.h>
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
+#include <ctime>
+#include <cstring>
+
+#include "SyncGuards.h"
 
 namespace {
 constexpr size_t kQueueLength = 4;
 constexpr uint32_t kWorkerStackSize = 8192;
-constexpr UBaseType_t kWorkerPriority = 1;
+constexpr UBaseType_t kWorkerPriority = 3;
 constexpr BaseType_t kWorkerCore = 0; // Run on Core 0 to prevent UI and GPS contention on Core 1
 constexpr uint32_t kHttpTimeoutMs = 7000;
-}
+constexpr char kGatewayCaPath[] = "/certs/gateway_ca.pem";
+constexpr time_t kMinValidEpoch = 1700000000; // Nov 2023+ confirms SNTP clock sync
+} // namespace
 
 AlertManager::AlertManager(SettingsStore* settings)
     : _settings(settings) {}
@@ -25,9 +32,35 @@ AlertManager::~AlertManager() {
         vQueueDelete(_alertQueue);
         _alertQueue = nullptr;
     }
+    if (_statusMutex != nullptr) {
+        vSemaphoreDelete(_statusMutex);
+        _statusMutex = nullptr;
+    }
+}
+
+void AlertManager::setLastStatus(const char* status) {
+    if (_statusMutex == nullptr || xSemaphoreTake(_statusMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+        if (status == nullptr) {
+            _lastStatus[0] = '\0';
+        } else {
+            strncpy(_lastStatus, status, sizeof(_lastStatus) - 1);
+            _lastStatus[sizeof(_lastStatus) - 1] = '\0';
+        }
+        if (_statusMutex != nullptr) {
+            xSemaphoreGive(_statusMutex);
+        }
+    }
 }
 
 bool AlertManager::begin() {
+    if (_statusMutex == nullptr) {
+        _statusMutex = xSemaphoreCreateMutex();
+        if (_statusMutex == nullptr) {
+            Serial.println("[ALERT] ERROR: Failed to create status mutex!");
+            return false;
+        }
+    }
+
     if (_alertQueue == nullptr) {
         _alertQueue = xQueueCreate(kQueueLength, sizeof(AlertEvent));
         if (_alertQueue == nullptr) {
@@ -84,11 +117,20 @@ bool AlertManager::triggerTestAlert(const GpsSnapshot& gps) {
 }
 
 bool AlertManager::isBusy() const {
-    return _isBusy;
+    return _isBusy.load(std::memory_order_acquire);
 }
 
 String AlertManager::lastStatus() const {
-    return _lastStatus;
+    String copy;
+    if (_statusMutex == nullptr || xSemaphoreTake(_statusMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+        copy = _lastStatus;
+        if (_statusMutex != nullptr) {
+            xSemaphoreGive(_statusMutex);
+        }
+    } else {
+        copy = "Busy";
+    }
+    return copy;
 }
 
 void AlertManager::workerTask(void* param) {
@@ -100,27 +142,27 @@ void AlertManager::runWorker() {
     AlertEvent event;
     while (true) {
         if (xQueueReceive(_alertQueue, &event, portMAX_DELAY) == pdPASS) {
-            _isBusy = true;
+            _isBusy.store(true, std::memory_order_release);
             Serial.printf("[ALERT] Worker received event: %s\n", event.event);
 
             if (_settings == nullptr) {
-                _lastStatus = "Error: SettingsStore not initialized";
-                _isBusy = false;
+                setLastStatus("Error: SettingsStore not initialized");
+                _isBusy.store(false, std::memory_order_release);
                 continue;
             }
 
             AlertConfig config;
             if (!_settings->loadAlertConfig(config) || !config.enabled) {
-                _lastStatus = "Alerts are currently disabled";
+                setLastStatus("Alerts are currently disabled");
                 Serial.println("[ALERT] Alert feature is disabled in settings.");
-                _isBusy = false;
+                _isBusy.store(false, std::memory_order_release);
                 continue;
             }
 
             if (config.gatewayUrl.isEmpty()) {
-                _lastStatus = "Cloudflare Gateway URL not configured";
+                setLastStatus("Cloudflare Gateway URL not configured");
                 Serial.println("[ALERT] Gateway URL is empty. Aborting.");
-                _isBusy = false;
+                _isBusy.store(false, std::memory_order_release);
                 continue;
             }
 
@@ -133,14 +175,14 @@ void AlertManager::runWorker() {
             }
 
             if (WiFi.status() != WL_CONNECTED) {
-                _lastStatus = "Error: No Wi-Fi or Hotspot connection";
+                setLastStatus("Error: No Wi-Fi or Hotspot connection");
                 Serial.println("[ALERT] Cannot send alert: No Internet connection.");
-                _isBusy = false;
+                _isBusy.store(false, std::memory_order_release);
                 continue;
             }
 
             sendAlertPayload(event, config);
-            _isBusy = false;
+            _isBusy.store(false, std::memory_order_release);
         }
     }
 }
@@ -176,10 +218,36 @@ bool AlertManager::sendAlertPayload(const AlertEvent& event, const AlertConfig& 
     String jsonBody;
     serializeJson(doc, jsonBody);
 
+    // Load optional Root CA from LittleFS when system clock is SNTP-synced
+    String caPem;
+    const time_t nowEpoch = std::time(nullptr);
+    if (nowEpoch >= kMinValidEpoch) {
+        FsLock fsLock(pdMS_TO_TICKS(500));
+        if (fsLock.locked() && LittleFS.exists(kGatewayCaPath)) {
+            File caFile = LittleFS.open(kGatewayCaPath, "r");
+            if (caFile && caFile.size() > 0 && caFile.size() < 8192) {
+                caPem = caFile.readString();
+            }
+            if (caFile) caFile.close();
+        }
+    }
+
+    // Serialize outbound TLS allocation across Core 0 tasks
+    NetTlsGate tlsGate(pdMS_TO_TICKS(15000));
+    if (!tlsGate.acquired()) {
+        setLastStatus("Error: Network busy (TLS gate timeout)");
+        Serial.println("[ALERT] NetTlsGate timeout!");
+        return false;
+    }
+
     Serial.printf("[ALERT] Dispatching to Gateway: %s\n", config.gatewayUrl.c_str());
 
     WiFiClientSecure client;
-    client.setInsecure();
+    if (!caPem.isEmpty()) {
+        client.setCACert(caPem.c_str());
+    } else {
+        client.setInsecure();
+    }
     client.setTimeout(kHttpTimeoutMs / 1000U);
 
     HTTPClient http;
@@ -187,7 +255,7 @@ bool AlertManager::sendAlertPayload(const AlertEvent& event, const AlertConfig& 
     http.setTimeout(kHttpTimeoutMs);
 
     if (!http.begin(client, config.gatewayUrl)) {
-        _lastStatus = "Error: Cannot connect to Gateway URL";
+        setLastStatus("Error: Cannot connect to Gateway URL");
         Serial.println("[ALERT] http.begin() failed!");
         return false;
     }
@@ -199,12 +267,15 @@ bool AlertManager::sendAlertPayload(const AlertEvent& event, const AlertConfig& 
 
     const int httpCode = http.POST(jsonBody);
     bool ok = false;
+    char statusBuf[96];
     if (httpCode >= 200 && httpCode < 300) {
-        _lastStatus = "Sent successfully (HTTP " + String(httpCode) + ")";
+        snprintf(statusBuf, sizeof(statusBuf), "Sent successfully (HTTP %d)", httpCode);
+        setLastStatus(statusBuf);
         Serial.printf("[ALERT] Sent successfully! Response: %s\n", http.getString().c_str());
         ok = true;
     } else {
-        _lastStatus = "Gateway error (HTTP " + String(httpCode) + ")";
+        snprintf(statusBuf, sizeof(statusBuf), "Gateway error (HTTP %d)", httpCode);
+        setLastStatus(statusBuf);
         Serial.printf("[ALERT] Gateway responded with error code %d: %s\n", httpCode, http.getString().c_str());
     }
 

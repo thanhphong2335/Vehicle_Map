@@ -1,6 +1,7 @@
 #pragma once
 
 #include <Arduino.h>
+#include <freertos/FreeRTOS.h>
 #include <stdint.h>
 #include "PinConfig.h"
 
@@ -21,13 +22,13 @@ public:
     void loop();
 
     void setPattern(LedPattern pattern, uint32_t color = 0x00FF00);
-    LedPattern pattern() const { return _pattern; }
+    LedPattern pattern() const;
 
     void setUserPattern(LedPattern pattern, uint32_t color = 0x00FF88);
-    LedPattern userPattern() const { return _userPattern; }
+    LedPattern userPattern() const;
 
     void setBrightness(uint8_t brightness);
-    uint8_t brightness() const { return _brightness; }
+    uint8_t brightness() const;
 
     void updateFromSystem(bool fallDetected, bool navigating, bool turnImminent, bool gpsLocked, bool wifiConnected);
 
@@ -43,7 +44,8 @@ private:
     uint8_t _brightness;
     uint32_t _lastUpdateMs;
     uint16_t _step;
+    mutable portMUX_TYPE _mux = portMUX_INITIALIZER_UNLOCKED;
 
-    void writeRgb(uint8_t r, uint8_t g, uint8_t b);
+    void writeRgb(uint8_t r, uint8_t g, uint8_t b, uint8_t brightness);
     static void hsvToRgb(uint16_t h, uint8_t s, uint8_t v, uint8_t& r, uint8_t& g, uint8_t& b);
 };

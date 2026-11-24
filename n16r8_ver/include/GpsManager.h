@@ -2,6 +2,8 @@
 
 #include <Arduino.h>
 #include <TinyGPSPlus.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
 
 #include "MotoMapTypes.h"
 #include "PinConfig.h"
@@ -11,14 +13,15 @@ public:
     void begin();
     void loop();
 
-    GpsSnapshot snapshot();
+    GpsSnapshot snapshot() const;
     uint32_t fixSequence() const;
     uint32_t charactersProcessed() const;
 
 private:
     HardwareSerial _serial{1};
-    TinyGPSPlus _gps;
+    mutable TinyGPSPlus _gps;
+    mutable SemaphoreHandle_t _mutex = nullptr;
     uint32_t _fixSequence = 0;
 
-    bool hasNeoFix();
+    bool hasNeoFixLocked() const;
 };

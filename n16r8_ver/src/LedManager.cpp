@@ -15,26 +15,58 @@ LedManager::LedManager(int pin)
 
 void LedManager::begin() {
     pinMode(_pin, OUTPUT);
-    writeRgb(0, 0, 0);
+    writeRgb(0, 0, 0, _brightness);
 }
 
 void LedManager::setUserPattern(LedPattern pattern, uint32_t color) {
+    portENTER_CRITICAL(&_mux);
     _userPattern = pattern;
     _userColor = color;
-    setPattern(pattern, color);
-}
-
-void LedManager::setPattern(LedPattern pattern, uint32_t color) {
     if (_pattern != pattern || (_pattern == LedPattern::Solid && _targetColor != color)) {
         _pattern = pattern;
         _targetColor = color;
         _step = 0;
         _lastUpdateMs = 0;
     }
+    portEXIT_CRITICAL(&_mux);
+}
+
+void LedManager::setPattern(LedPattern pattern, uint32_t color) {
+    portENTER_CRITICAL(&_mux);
+    if (_pattern != pattern || (_pattern == LedPattern::Solid && _targetColor != color)) {
+        _pattern = pattern;
+        _targetColor = color;
+        _step = 0;
+        _lastUpdateMs = 0;
+    }
+    portEXIT_CRITICAL(&_mux);
+}
+
+LedPattern LedManager::pattern() const {
+    portENTER_CRITICAL(&_mux);
+    const LedPattern p = _pattern;
+    portEXIT_CRITICAL(&_mux);
+    return p;
+}
+
+LedPattern LedManager::userPattern() const {
+    portENTER_CRITICAL(&_mux);
+    const LedPattern p = _userPattern;
+    portEXIT_CRITICAL(&_mux);
+    return p;
 }
 
 void LedManager::setBrightness(uint8_t brightness) {
+    portENTER_CRITICAL(&_mux);
     _brightness = brightness;
+    portEXIT_CRITICAL(&_mux);
+}
+
+uint8_t LedManager::brightness() const {
+    portENTER_CRITICAL(&_mux);
+    const uint8_t b = _brightness;
+    portEXIT_CRITICAL(&_mux);
+    return b;
 }
 
 const char* LedManager::patternName(LedPattern pattern) {
@@ -58,8 +90,8 @@ LedPattern LedManager::patternFromName(const String& name) {
     return LedPattern::Off;
 }
 
-void LedManager::writeRgb(uint8_t r, uint8_t g, uint8_t b) {
-    const uint16_t scale = _brightness;
+void LedManager::writeRgb(uint8_t r, uint8_t g, uint8_t b, uint8_t brightness) {
+    const uint16_t scale = brightness;
     const uint8_t scaledR = static_cast<uint8_t>((r * scale) / 255);
     const uint8_t scaledG = static_cast<uint8_t>((g * scale) / 255);
     const uint8_t scaledB = static_cast<uint8_t>((b * scale) / 255);
@@ -95,35 +127,42 @@ void LedManager::updateFromSystem(bool fallDetected, bool navigating, bool turnI
     (void)gpsLocked;
     (void)wifiConnected;
 
-    // Highest priority: Vehicle crash / fall detection (SOS emergency strobe)
+    LedPattern nextPattern;
+    uint32_t nextColor;
     if (fallDetected) {
-        setPattern(LedPattern::SosFallAlert, 0xFF0000);
-        return;
+        nextPattern = LedPattern::SosFallAlert;
+        nextColor = 0xFF0000;
+    } else if (navigating && turnImminent) {
+        nextPattern = LedPattern::TurnSignal;
+        nextColor = 0xFF9900;
+    } else {
+        portENTER_CRITICAL(&_mux);
+        nextPattern = _userPattern;
+        nextColor = _userColor;
+        portEXIT_CRITICAL(&_mux);
     }
 
-    // Secondary priority: Turn maneuver warning during active navigation
-    if (navigating && turnImminent) {
-        setPattern(LedPattern::TurnSignal, 0xFF9900);
-        return;
-    }
-
-    // Default state: User-selected pattern
-    setPattern(_userPattern, _userColor);
+    setPattern(nextPattern, nextColor);
 }
 
 void LedManager::loop() {
     const uint32_t now = millis();
+    portENTER_CRITICAL(&_mux);
+    const LedPattern activePattern = _pattern;
+    const uint32_t targetColor = _targetColor;
+    const uint8_t bright = _brightness;
+    portEXIT_CRITICAL(&_mux);
 
-    switch (_pattern) {
+    switch (activePattern) {
         case LedPattern::Off:
-            writeRgb(0, 0, 0);
+            writeRgb(0, 0, 0, bright);
             break;
 
         case LedPattern::Solid: {
-            const uint8_t r = (_targetColor >> 16) & 0xFF;
-            const uint8_t g = (_targetColor >> 8) & 0xFF;
-            const uint8_t b = _targetColor & 0xFF;
-            writeRgb(r, g, b);
+            const uint8_t r = (targetColor >> 16) & 0xFF;
+            const uint8_t g = (targetColor >> 8) & 0xFF;
+            const uint8_t b = targetColor & 0xFF;
+            writeRgb(r, g, b, bright);
             break;
         }
 
@@ -133,11 +172,11 @@ void LedManager::loop() {
                 _lastUpdateMs = now;
                 const uint32_t t = now % 600;
                 if (t < 50 || (t >= 100 && t < 150)) {
-                    writeRgb(255, 0, 0);
+                    writeRgb(255, 0, 0, bright);
                 } else if ((t >= 300 && t < 350) || (t >= 400 && t < 450)) {
-                    writeRgb(0, 40, 255);
+                    writeRgb(0, 40, 255, bright);
                 } else {
-                    writeRgb(0, 0, 0);
+                    writeRgb(0, 0, 0, bright);
                 }
             }
             break;
@@ -151,7 +190,7 @@ void LedManager::loop() {
 
                 uint8_t r, g, b;
                 hsvToRgb(_step, 255, 255, r, g, b);
-                writeRgb(r, g, b);
+                writeRgb(r, g, b, bright);
             }
             break;
         }
@@ -162,9 +201,9 @@ void LedManager::loop() {
                 _lastUpdateMs = now;
                 const bool on = (now % 600) < 300;
                 if (on) {
-                    writeRgb(255, 140, 0);
+                    writeRgb(255, 140, 0, bright);
                 } else {
-                    writeRgb(0, 0, 0);
+                    writeRgb(0, 0, 0, bright);
                 }
             }
             break;
@@ -177,9 +216,9 @@ void LedManager::loop() {
                 const uint32_t t = now % 400;
                 const bool flash = (t < 60) || (t >= 120 && t < 180);
                 if (flash) {
-                    writeRgb(255, 0, 0);
+                    writeRgb(255, 0, 0, bright);
                 } else {
-                    writeRgb(0, 0, 0);
+                    writeRgb(0, 0, 0, bright);
                 }
             }
             break;

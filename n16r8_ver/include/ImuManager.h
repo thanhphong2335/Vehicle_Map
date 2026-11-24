@@ -4,8 +4,10 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 #include <freertos/task.h>
+#include <atomic>
 
 #include "MotoMapTypes.h"
+#include "NavMath.h"
 
 class AlertManager;
 class GpsManager;
@@ -45,7 +47,8 @@ private:
 
     ImuData _latestData{};
     uint8_t _whoAmI = 0;
-    bool _sensorReady = false;
+    std::atomic<bool> _sensorReady{false};
+    std::atomic<bool> _fallAlertActive{false};
 
     // Fall detection parameters and thresholds
     static constexpr float kFallAngleDeg = 45.0f;
@@ -53,10 +56,9 @@ private:
     static constexpr uint32_t kFallHoldMs = 5000;
     static constexpr uint32_t kClearHoldMs = 2000;
 
-    uint32_t _fallStartMs = 0;
-    uint32_t _clearStartMs = 0;
-    bool _fallAlertActive = false;
-    bool _fallDismissed = false;
+    NavMath::ComplementaryAngleFilter _angleFilter{0.98F};
+    NavMath::FallDetectorFsm _fallFsm{kFallAngleDeg, kClearAngleDeg, kFallHoldMs, kClearHoldMs};
+    uint32_t _lastSampleUs = 0;
     bool _alertDispatched = false;
 
     static void taskTrampoline(void* param);

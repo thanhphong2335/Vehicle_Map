@@ -7,6 +7,7 @@
 #include <LittleFS.h>
 #include <LovyanGFX.hpp>
 #include <freertos/FreeRTOS.h>
+#include <freertos/queue.h>
 #include <freertos/task.h>
 
 #include "MotoMapTypes.h"
@@ -24,7 +25,7 @@ public:
     void loop(bool internetConnected);
 
     bool showingMap() const;
-    const String& lastError() const;
+    String lastError() const;
 
     struct TileKey {
         int32_t x = 0;
@@ -48,8 +49,21 @@ private:
         bool valid = false;
     };
 
+    struct TileJob {
+        TileKey tile;
+        uint8_t bufferIndex = 0;
+    };
+
+    struct TileResult {
+        bool ok = false;
+        TileKey tile;
+        uint8_t bufferIndex = 0;
+        size_t size = 0;
+        char error[48]{};
+    };
+
     static constexpr uint8_t kMaximumVisibleTiles = 9;
-    static constexpr size_t kPsramTileCacheSize = 24; // 24 tiles in PSRAM for route pre-fetching (~3.0 MB)
+    static constexpr size_t kPsramTileCacheSize = 24; // 24 tiles in PSRAM (~3.0 MB)
 
     DisplayManager* _display;
     RouteManager* _route;
@@ -78,21 +92,17 @@ private:
     lgfx::LGFX_Sprite _frameSprite;  // 320x240 full screen framebuffer in PSRAM
     bool _spritesInitialized = false;
 
-    // Pure PSRAM Tile Cache (No flash writes)
+    // Pure PSRAM Tile Cache + Core 0/1 isolated buffers
     CachedTile _psramTileCache[kPsramTileCacheSize];
-    uint8_t* _downloadBuffer = nullptr;
+    uint8_t* _downloadBuffers[2]{nullptr, nullptr}; // Ping-pong buffers for Core 0 network download
+    uint8_t* _flashTileBuffer = nullptr;            // Core 1 dedicated buffer for LittleFS reads
+    uint8_t _nextBufferIndex = 0;
 
-    portMUX_TYPE _taskMux = portMUX_INITIALIZER_UNLOCKED;
     TaskHandle_t _downloadTask = nullptr;
-    bool _jobPending = false;
-    bool _jobActive = false;
-    TileKey _jobTile;
+    QueueHandle_t _tileJobQueue = nullptr;
+    QueueHandle_t _tileResultQueue = nullptr;
+    bool _tileInFlight = false;
     TileKey _activeTile;
-    bool _resultPending = false;
-    bool _resultOk = false;
-    TileKey _resultTile;
-    size_t _resultSize = 0;
-    char _resultError[48]{};
 
     static bool sameTile(const TileKey& left, const TileKey& right);
     static void project(double latitude,
@@ -125,14 +135,15 @@ private:
                           uint8_t count,
                           const TileKey& centerTile,
                           bool internetConnected);
-    bool downloadBusy();
-    bool tileBusy(const TileKey& tile);
+    bool downloadBusy() const;
+    bool tileBusy(const TileKey& tile) const;
     bool enqueueTile(const TileKey& tile);
     void processDownloadResult();
 
     static void downloadTaskThunk(void* parameter);
     void downloadLoop();
-    bool downloadTile(const TileKey& tile, size_t& receivedBytes, String& error);
+    bool downloadTile(const TileKey& tile, uint8_t* buffer, size_t& receivedBytes, String& error);
+    static bool writeOfflineTileFile(const TileKey& tile, const uint8_t* data, size_t length);
 };
 
 #endif

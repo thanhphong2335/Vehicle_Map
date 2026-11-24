@@ -4,6 +4,7 @@
 #include <FS.h>
 #include <LittleFS.h>
 #include <LovyanGFX.hpp>
+#include <atomic>
 
 #include "DisplayConfig.h"
 #include "MotoMapTypes.h"
@@ -15,17 +16,18 @@ public:
 
     void begin();
     void setMode(DeviceMode mode);
+    void enterNavigationMode();
     void showNavigation(const NavigationData& data);
     void showIdle(const String& detail = "Waiting for iPhone");
     void showMediaPlaceholder();
     void showError(const String& message);
     void showStatus(const String& title, const String& detail, uint16_t color = TFT_CYAN);
     bool drawJpeg(const uint8_t* data, size_t length);
-    bool drawJpegFile(const String& path);
+    bool drawJpegFile(const String& path, bool setMediaMode = true);
     int32_t width() const { return DisplayConfig::kWidth; }
     int32_t height() const { return DisplayConfig::kHeight; }
-    DeviceMode mode() const { return _mode; }
-    bool isShowingQr() const { return _showingQr; }
+    DeviceMode mode() const { return _mode.load(std::memory_order_acquire); }
+    bool isShowingQr() const { return _showingQr.load(std::memory_order_acquire); }
 
     lgfx::LGFX_Device& device();
 
@@ -39,8 +41,8 @@ private:
     };
 
     Panel _display;
-    DeviceMode _mode = DeviceMode::Idle;
-    bool _showingQr = false;
+    std::atomic<DeviceMode> _mode{DeviceMode::Idle};
+    std::atomic<bool> _showingQr{false};
 
     void drawHeader(const char* title, uint16_t color);
     void drawArrow(Maneuver maneuver);

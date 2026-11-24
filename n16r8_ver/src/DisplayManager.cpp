@@ -1,5 +1,6 @@
 #include "DisplayManager.h"
 #include "DebugLog.h"
+#include "SyncGuards.h"
 #include "TextUtils.h"
 
 #include <LittleFS.h>
@@ -101,6 +102,11 @@ void DisplayManager::setMode(DeviceMode mode) {
         case DeviceMode::Error: showError("Device error"); break;
         case DeviceMode::Navigation: break;
     }
+}
+
+void DisplayManager::enterNavigationMode() {
+    _mode.store(DeviceMode::Navigation, std::memory_order_release);
+    _showingQr.store(false, std::memory_order_release);
 }
 
 void DisplayManager::drawHeader(const char* title, uint16_t color) {
@@ -228,7 +234,7 @@ void DisplayManager::showIdle(const String& detail) {
               detail.c_str(), isWebUrl ? 1 : 0, _showingQr ? 1 : 0);
 
     // 1. Try to load the beautiful sci-fi background graphic (/ui/setup_background.jpg)
-    const bool hasBgImage = drawJpegFile("/ui/setup_background.jpg");
+    const bool hasBgImage = drawJpegFile("/ui/setup_background.jpg", false);
     _mode = DeviceMode::Idle;
     _showingQr = isWebUrl;
 
@@ -417,11 +423,15 @@ bool DisplayManager::drawJpeg(const uint8_t* data, size_t length) {
     return ok;
 }
 
-bool DisplayManager::drawJpegFile(const String& path) {
-    if (!LittleFS.exists(path)) {
+bool DisplayManager::drawJpegFile(const String& path, bool setMediaMode) {
+    FsLock fsLock(pdMS_TO_TICKS(1000));
+    if (!fsLock.locked() || !LittleFS.exists(path)) {
         return false;
     }
-    _mode = DeviceMode::Media;
+    if (setMediaMode) {
+        _mode = DeviceMode::Media;
+        _showingQr = false;
+    }
     TJpgDec.setJpgScale(1);
     _display.startWrite();
     const bool ok = (TJpgDec.drawFsJpg(0, 0, path, LittleFS) == JDR_OK);

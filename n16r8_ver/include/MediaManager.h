@@ -2,22 +2,42 @@
 
 #include <Arduino.h>
 #include <FS.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
+#include <atomic>
 
 class DisplayManager;
 
 class MediaManager {
 public:
+    struct MediaStats {
+        bool animationValid = false;
+        uint16_t animationFrames = 0;
+        uint8_t animationFps = 0;
+        uint32_t animationBytes = 0;
+        uint32_t streamFrameCount = 0;
+        bool testImageActive = false;
+    };
+
     explicit MediaManager(DisplayManager* display);
+    ~MediaManager();
 
     void begin();
     void loop(bool navigationActive);
 
+    // Core 0 safe ingest / upload methods (no direct SPI2 drawing)
+    bool queueStreamJpeg(const uint8_t* data, size_t length);
+    bool saveTestImageOnly(const uint8_t* data, size_t length);
+    void clearTestImage();
+
+    // Core 1 rendering methods (SPI2 exclusive)
+    bool drawPendingStreamFrame();
     bool handleJpeg(const uint8_t* data, size_t length);
     bool showTestImage(const uint8_t* data, size_t length);
-    void clearTestImage();
+    bool showSavedImage();
+
     bool hasTestImage() const;
     bool hasSavedImage() const;
-    bool showSavedImage();
     void setTestImageActive(bool active);
     uint32_t frameCount() const;
 
@@ -25,6 +45,7 @@ public:
     uint16_t animationFrameCount() const;
     uint8_t animationFps() const;
     uint32_t animationBytes() const;
+    MediaStats statsSnapshot() const;
 
     bool beginAnimationUpload(uint16_t frameCount,
                               uint8_t fps,
@@ -32,8 +53,6 @@ public:
                               String& error);
     bool beginAnimationFrame(const String& uploadId, uint16_t index, String& error);
     bool writeAnimationFrameChunk(const uint8_t* data, size_t length, String& error);
-    ~MediaManager();
-
     bool finishAnimationFrame(String& error);
     void abortAnimationFrame();
     bool commitAnimationUpload(const String& uploadId, String& error);
@@ -53,9 +72,11 @@ private:
     };
 
     DisplayManager* _display;
-    uint32_t _streamFrameCount = 0;
+    mutable SemaphoreHandle_t _mutex = nullptr;
+
+    std::atomic<uint32_t> _streamFrameCount{0};
     uint32_t _externalStreamUntilMs = 0;
-    bool _testImageActive = false;
+    std::atomic<bool> _testImageActive{false};
     bool _animationValid = false;
     uint16_t _animationFrames = 0;
     uint8_t _animationFps = 0;
@@ -68,6 +89,11 @@ private:
 
     CachedFrame _cachedFrames[kMaximumFrames]{};
     bool _ramCacheActive = false;
+
+    // Staging buffer for Core 0 /media/frame -> Core 1 SPI2 draw
+    uint8_t* _streamStagingBuffer = nullptr;
+    size_t _streamStagingLength = 0;
+    bool _streamStagingPending = false;
 
     String _uploadId;
     uint16_t _uploadExpectedFrames = 0;

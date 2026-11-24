@@ -3,6 +3,26 @@
 #include <Preferences.h>
 
 namespace {
+class NvsLock {
+public:
+    explicit NvsLock(SemaphoreHandle_t mutex) : _mutex(mutex) {
+        if (_mutex != nullptr) {
+            _acquired = (xSemaphoreTakeRecursive(_mutex, pdMS_TO_TICKS(1000)) == pdTRUE);
+        } else {
+            _acquired = true;
+        }
+    }
+    ~NvsLock() {
+        if (_acquired && _mutex != nullptr) {
+            xSemaphoreGiveRecursive(_mutex);
+        }
+    }
+    bool locked() const { return _acquired; }
+private:
+    SemaphoreHandle_t _mutex;
+    bool _acquired = false;
+};
+
 constexpr char kNamespace[] = "motomap";
 constexpr char kWifiSsid[] = "wifi_ssid";
 constexpr char kWifiPassword[] = "wifi_pass";
@@ -19,6 +39,11 @@ constexpr char kAlertChatIds[] = "alrt_chats";
 }
 
 bool SettingsStore::begin() {
+    if (_mutex == nullptr) {
+        _mutex = xSemaphoreCreateRecursiveMutex();
+    }
+    NvsLock lock(_mutex);
+    if (!lock.locked()) return false;
     Preferences preferences;
     const bool ok = preferences.begin(kNamespace, false);
     preferences.end();
@@ -26,6 +51,8 @@ bool SettingsStore::begin() {
 }
 
 bool SettingsStore::loadWifi(String& ssid, String& password) const {
+    NvsLock lock(_mutex);
+    if (!lock.locked()) return false;
     Preferences preferences;
     if (!preferences.begin(kNamespace, true)) {
         return false;
@@ -40,6 +67,8 @@ bool SettingsStore::saveWifi(const String& ssid, const String& password) {
     if (ssid.length() == 0 || ssid.length() > 32 || password.length() > 63) {
         return false;
     }
+    NvsLock lock(_mutex);
+    if (!lock.locked()) return false;
     Preferences preferences;
     if (!preferences.begin(kNamespace, false)) {
         return false;
@@ -58,6 +87,8 @@ bool SettingsStore::hasWifi() const {
 
 DestinationData SettingsStore::loadDestination() const {
     DestinationData destination;
+    NvsLock lock(_mutex);
+    if (!lock.locked()) return destination;
     Preferences preferences;
     if (!preferences.begin(kNamespace, true)) {
         return destination;
@@ -84,6 +115,8 @@ bool SettingsStore::saveDestination(const DestinationData& destination) {
         return false;
     }
 
+    NvsLock lock(_mutex);
+    if (!lock.locked()) return false;
     Preferences preferences;
     if (!preferences.begin(kNamespace, false)) {
         return false;
@@ -99,6 +132,8 @@ bool SettingsStore::saveDestination(const DestinationData& destination) {
 }
 
 bool SettingsStore::setDestinationActive(bool active) {
+    NvsLock lock(_mutex);
+    if (!lock.locked()) return false;
     Preferences preferences;
     if (!preferences.begin(kNamespace, false)) {
         return false;
@@ -109,6 +144,8 @@ bool SettingsStore::setDestinationActive(bool active) {
 }
 
 bool SettingsStore::loadAlertConfig(AlertConfig& config) const {
+    NvsLock lock(_mutex);
+    if (!lock.locked()) return false;
     Preferences preferences;
     if (!preferences.begin(kNamespace, true)) {
         return false;
@@ -122,6 +159,8 @@ bool SettingsStore::loadAlertConfig(AlertConfig& config) const {
 }
 
 bool SettingsStore::saveAlertConfig(const AlertConfig& config) {
+    NvsLock lock(_mutex);
+    if (!lock.locked()) return false;
     Preferences preferences;
     if (!preferences.begin(kNamespace, false)) {
         return false;

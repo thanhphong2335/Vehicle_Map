@@ -4,6 +4,9 @@
 #include <DNSServer.h>
 #include <FS.h>
 #include <WebServer.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
+#include <freertos/task.h>
 
 class DisplayManager;
 class GpsManager;
@@ -27,6 +30,7 @@ public:
                       NavigationMapManager* mapManager = nullptr,
                       AlertManager* alertManager = nullptr,
                       ImuManager* imu = nullptr);
+    ~ConnectionManager();
 
     void begin();
     void loop();
@@ -42,6 +46,10 @@ private:
     };
 
     WebServer _server{80};
+    TaskHandle_t _webTaskHandle = nullptr;
+    mutable SemaphoreHandle_t _netMutex = nullptr;
+    static void webTaskThunk(void* parameter);
+    void webTaskLoop();
     DisplayManager* _display;
     MediaManager* _media;
     ModeController* _modeController;
@@ -65,15 +73,20 @@ private:
     bool _dnsStarted = false;
     bool _uploadRequestOk = false;
     String _uploadRequestError;
-    String _testImageUploadData;
+    uint8_t* _testImageUploadBuf = nullptr;
+    size_t _testImageUploadLen = 0;
     String _testImageUploadError;
     bool _testImageUploadOk = false;
     bool _otaInProgress = false;
+    bool _otaFsUnmounted = false;
     size_t _otaWrittenBytes = 0;
     int _otaCommand = 0;
     String _otaError;
     IPAddress _lastConnectedIp;
     String _lastConnectedSsid;
+
+    void freeTestImageUploadBuffer();
+    void remountFsIfNeeded();
 
     void configureRoutes();
     void startStation();

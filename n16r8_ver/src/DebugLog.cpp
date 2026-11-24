@@ -6,6 +6,8 @@
 #include <WiFi.h>
 #include <stdarg.h>
 
+#include "SyncGuards.h"
+
 namespace DebugLog {
 
 static constexpr size_t kBufferSize = 8192;
@@ -59,17 +61,20 @@ void log(const char* tag, const char* format, ...) {
     }
     portEXIT_CRITICAL(&sLogMux);
 
-    // 3. Append to LittleFS /debug.log if filesystem is available
-    File f = LittleFS.open("/debug.log", "a");
-    if (f) {
-        if (f.size() > 32768) {
-            f.close();
-            LittleFS.remove("/debug.log");
-            f = LittleFS.open("/debug.log", "w");
-        }
+    // 3. Append to LittleFS /debug.log if filesystem is available (non-blocking short wait)
+    FsLock fsLock(pdMS_TO_TICKS(15));
+    if (fsLock.locked()) {
+        File f = LittleFS.open("/debug.log", "a");
         if (f) {
-            f.print(line);
-            f.close();
+            if (f.size() > 32768) {
+                f.close();
+                LittleFS.remove("/debug.log");
+                f = LittleFS.open("/debug.log", "w");
+            }
+            if (f) {
+                f.print(line);
+                f.close();
+            }
         }
     }
 }
@@ -96,7 +101,8 @@ void clearLogs() {
     sLogBuffer[0] = '\0';
     portEXIT_CRITICAL(&sLogMux);
 
-    if (LittleFS.exists("/debug.log")) {
+    FsLock fsLock(pdMS_TO_TICKS(200));
+    if (fsLock.locked() && LittleFS.exists("/debug.log")) {
         LittleFS.remove("/debug.log");
     }
 }

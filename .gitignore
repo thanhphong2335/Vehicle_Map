@@ -45,3 +45,5 @@ doc_env
 *.env
 env.js
 **/data/env.js
+n16r8_ver/docs/
+ES_report/

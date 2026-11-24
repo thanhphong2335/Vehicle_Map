@@ -6,11 +6,14 @@
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
 #include <esp_heap_caps.h>
+#include <esp_task_wdt.h>
 #include <math.h>
 
 #include "DisplayConfig.h"
 #include "DisplayManager.h"
+#include "NavMath.h"
 #include "RouteManager.h"
+#include "SyncGuards.h"
 #include "TextUtils.h"
 
 namespace {
@@ -52,24 +55,12 @@ const char* maneuverInstruction(Maneuver maneuver) {
     }
 }
 
-float bearingDegrees(double fromLatitude,
-                     double fromLongitude,
-                     double toLatitude,
-                     double toLongitude) {
-    const double fromLatRadians = fromLatitude * DEG_TO_RAD;
-    const double toLatRadians = toLatitude * DEG_TO_RAD;
-    const double longitudeDelta = (toLongitude - fromLongitude) * DEG_TO_RAD;
-    const double y = sin(longitudeDelta) * cos(toLatRadians);
-    const double x = cos(fromLatRadians) * sin(toLatRadians) -
-                     sin(fromLatRadians) * cos(toLatRadians) * cos(longitudeDelta);
-    float result = static_cast<float>(atan2(y, x) * RAD_TO_DEG);
-    if (result < 0.0F) result += 360.0F;
-    return result;
-}
-
-float shortestAngleDelta(float fromDegrees, float toDegrees) {
-    float delta = fmodf(toDegrees - fromDegrees + 540.0F, 360.0F) - 180.0F;
-    return delta;
+uint8_t* allocateTileBuffer(size_t bytes) {
+    uint8_t* ptr = static_cast<uint8_t*>(ps_malloc(bytes));
+    if (ptr == nullptr) {
+        ptr = static_cast<uint8_t*>(malloc(bytes));
+    }
+    return ptr;
 }
 
 } // namespace
@@ -82,9 +73,23 @@ NavigationMapManager::~NavigationMapManager() {
         vTaskDelete(_downloadTask);
         _downloadTask = nullptr;
     }
-    if (_downloadBuffer != nullptr) {
-        free(_downloadBuffer);
-        _downloadBuffer = nullptr;
+    if (_tileJobQueue != nullptr) {
+        vQueueDelete(_tileJobQueue);
+        _tileJobQueue = nullptr;
+    }
+    if (_tileResultQueue != nullptr) {
+        vQueueDelete(_tileResultQueue);
+        _tileResultQueue = nullptr;
+    }
+    for (uint8_t i = 0; i < 2; ++i) {
+        if (_downloadBuffers[i] != nullptr) {
+            free(_downloadBuffers[i]);
+            _downloadBuffers[i] = nullptr;
+        }
+    }
+    if (_flashTileBuffer != nullptr) {
+        free(_flashTileBuffer);
+        _flashTileBuffer = nullptr;
     }
 }
 
@@ -113,7 +118,7 @@ void NavigationMapManager::initPsramSprites() {
                       (DisplayConfig::kWidth * DisplayConfig::kHeight * 2) / 1024);
     }
 
-    // Allocate 20 decoded tile slots in PSRAM (pure in-memory cache, zero flash writes)
+    // Allocate 24 decoded tile slots in PSRAM (pure in-memory cache)
     for (size_t i = 0; i < kPsramTileCacheSize; ++i) {
         _psramTileCache[i].sprite.setPsram(true);
         _psramTileCache[i].sprite.setColorDepth(16);
@@ -125,11 +130,10 @@ void NavigationMapManager::initPsramSprites() {
                   kPsramTileCacheSize,
                   (kPsramTileCacheSize * kTileSize * kTileSize * 2) / (1024 * 1024));
 
-    // Allocate PNG download buffer in PSRAM
-    _downloadBuffer = static_cast<uint8_t*>(ps_malloc(kMaximumTileBytes));
-    if (_downloadBuffer == nullptr) {
-        _downloadBuffer = static_cast<uint8_t*>(malloc(kMaximumTileBytes));
-    }
+    // Allocate Ping-Pong buffers for Core 0 network and isolated buffer for Core 1 LittleFS reads
+    _downloadBuffers[0] = allocateTileBuffer(kMaximumTileBytes);
+    _downloadBuffers[1] = allocateTileBuffer(kMaximumTileBytes);
+    _flashTileBuffer = allocateTileBuffer(kMaximumTileBytes);
 
     _spritesInitialized = true;
 }
@@ -157,30 +161,27 @@ bool NavigationMapManager::getCachedTileSprite(const TileKey& tile, lgfx::LGFX_S
 }
 
 bool NavigationMapManager::loadTileFromFlash(const TileKey& tile, lgfx::LGFX_Sprite*& outSprite) {
-    const String path = tilePath(tile);
-    if (!LittleFS.exists(path)) return false;
-
-    File f = LittleFS.open(path, "r");
-    if (!f) return false;
-    const size_t size = f.size();
-    if (size == 0 || size > kMaximumTileBytes) {
-        f.close();
-        return false;
+    if (_flashTileBuffer == nullptr) {
+        _flashTileBuffer = allocateTileBuffer(kMaximumTileBytes);
+        if (_flashTileBuffer == nullptr) return false;
     }
 
-    if (_downloadBuffer == nullptr) {
-        _downloadBuffer = static_cast<uint8_t*>(malloc(kMaximumTileBytes));
-        if (_downloadBuffer == nullptr) {
+    size_t size = 0;
+    {
+        FsLock fsLock(pdMS_TO_TICKS(500));
+        if (!fsLock.locked()) return false;
+        const String path = tilePath(tile);
+        if (!LittleFS.exists(path)) return false;
+
+        File f = LittleFS.open(path, "r");
+        if (!f) return false;
+        size = f.size();
+        if (size == 0 || size > kMaximumTileBytes || f.read(_flashTileBuffer, size) != size) {
             f.close();
             return false;
         }
-    }
-
-    if (f.read(_downloadBuffer, size) != size) {
         f.close();
-        return false;
     }
-    f.close();
 
     size_t lruIndex = 0;
     uint32_t oldestTime = UINT32_MAX;
@@ -196,7 +197,7 @@ bool NavigationMapManager::loadTileFromFlash(const TileKey& tile, lgfx::LGFX_Spr
     }
 
     CachedTile& slot = _psramTileCache[lruIndex];
-    if (slot.sprite.drawPng(_downloadBuffer, size, 0, 0)) {
+    if (slot.sprite.drawPng(_flashTileBuffer, size, 0, 0)) {
         slot.key = tile;
         slot.lastAccess = millis();
         slot.valid = true;
@@ -214,11 +215,15 @@ bool NavigationMapManager::isTileInCache(const TileKey& tile) const {
         }
     }
     // 2. In Flash LittleFS
+    FsLock fsLock(pdMS_TO_TICKS(50));
+    if (!fsLock.locked()) return false;
     return LittleFS.exists(tilePath(tile));
 }
 
-bool NavigationMapManager::saveOfflineTile(const TileKey& tile, const uint8_t* data, size_t length) {
+bool NavigationMapManager::writeOfflineTileFile(const TileKey& tile, const uint8_t* data, size_t length) {
     if (data == nullptr || length == 0 || length > kMaximumTileBytes) return false;
+    FsLock fsLock(pdMS_TO_TICKS(1000));
+    if (!fsLock.locked()) return false;
     if (!LittleFS.exists("/tiles")) {
         LittleFS.mkdir("/tiles");
     }
@@ -227,14 +232,22 @@ bool NavigationMapManager::saveOfflineTile(const TileKey& tile, const uint8_t* d
     if (!f) return false;
     const bool ok = (f.write(data, length) == length);
     f.close();
+    return ok;
+}
 
-    lgfx::LGFX_Sprite* unused = nullptr;
-    loadTileFromFlash(tile, unused);
-    _dirty = true;
+bool NavigationMapManager::saveOfflineTile(const TileKey& tile, const uint8_t* data, size_t length) {
+    const bool ok = writeOfflineTileFile(tile, data, length);
+    if (ok) {
+        lgfx::LGFX_Sprite* unused = nullptr;
+        loadTileFromFlash(tile, unused);
+        _dirty = true;
+    }
     return ok;
 }
 
 bool NavigationMapManager::deleteOfflineTiles() {
+    FsLock fsLock(pdMS_TO_TICKS(2000));
+    if (!fsLock.locked()) return false;
     File root = LittleFS.open("/tiles");
     if (!root || !root.isDirectory()) {
         if (root) root.close();
@@ -251,6 +264,9 @@ bool NavigationMapManager::deleteOfflineTiles() {
     root.close();
 
     for (const auto& path : paths) {
+        if (esp_task_wdt_status(nullptr) == ESP_OK) {
+            esp_task_wdt_reset();
+        }
         LittleFS.remove(path);
     }
     return true;
@@ -259,6 +275,8 @@ bool NavigationMapManager::deleteOfflineTiles() {
 void NavigationMapManager::getOfflineTileStats(size_t& count, size_t& totalBytes) {
     count = 0;
     totalBytes = 0;
+    FsLock fsLock(pdMS_TO_TICKS(1000));
+    if (!fsLock.locked()) return;
     File root = LittleFS.open("/tiles");
     if (!root || !root.isDirectory()) {
         if (root) root.close();
@@ -281,21 +299,29 @@ void NavigationMapManager::begin() {
     }
 
     initPsramSprites();
+    if (_tileJobQueue == nullptr) {
+        _tileJobQueue = xQueueCreate(2, sizeof(TileJob));
+    }
+    if (_tileResultQueue == nullptr) {
+        _tileResultQueue = xQueueCreate(2, sizeof(TileResult));
+    }
 
-    const BaseType_t created = xTaskCreatePinnedToCore(
-        downloadTaskThunk,
-        "map_tile",
-        8192,
-        this,
-        1,
-        &_downloadTask,
-        0);
+    const BaseType_t created = (_tileJobQueue != nullptr && _tileResultQueue != nullptr)
+        ? xTaskCreatePinnedToCore(
+            downloadTaskThunk,
+            "map_tile",
+            8192,
+            this,
+            1,
+            &_downloadTask,
+            0)
+        : pdFAIL;
     if (created != pdPASS) {
         _lastError = "map_task_failed";
         return;
     }
     _started = true;
-    Serial.printf("ESP32-S3 Pure-RAM Heading-Up Navigation Map ready: CARTO Voyager z%u, %u RAM tiles cache (No Flash wear)\n",
+    Serial.printf("ESP32-S3 Pure-RAM Heading-Up Navigation Map ready: CARTO Voyager z%u, %u RAM tiles cache (Ping-Pong PSRAM)\n",
                   kMapZoom, kPsramTileCacheSize);
 }
 
@@ -325,10 +351,10 @@ void NavigationMapManager::onNavigation(const NavigationData& data) {
         const std::vector<RouteManager::RoutePoint>& points = _route->routePoints();
         size_t index = _route->nearestRouteIndex();
         if (index + 1 < points.size()) {
-            _stableCourseDeg = bearingDegrees(points[index].latitude,
-                                              points[index].longitude,
-                                              points[index + 1].latitude,
-                                              points[index + 1].longitude);
+            _stableCourseDeg = NavMath::bearingDegrees(points[index].latitude,
+                                                       points[index].longitude,
+                                                       points[index + 1].latitude,
+                                                       points[index + 1].longitude);
             _stableCourseValid = true;
         }
     }
@@ -355,7 +381,7 @@ void NavigationMapManager::loop(bool internetConnected) {
     if (!_started) return;
     _internetConnected = internetConnected;
     processDownloadResult();
-    if (!_active) return;
+    if (!_active || OtaGuard::isActive()) return;
 
     // Do not render navigation map or warning overlay when showing QR code or in Idle mode
     if (_display != nullptr && (_display->isShowingQr() || _display->mode() == DeviceMode::Idle)) {
@@ -411,7 +437,7 @@ void NavigationMapManager::loop(bool internetConnected) {
 }
 
 bool NavigationMapManager::showingMap() const { return _showingMap; }
-const String& NavigationMapManager::lastError() const { return _lastError; }
+String NavigationMapManager::lastError() const { return _lastError; }
 
 bool NavigationMapManager::sameTile(const TileKey& left, const TileKey& right) {
     return left.zoom == right.zoom && left.x == right.x && left.y == right.y;
@@ -521,7 +547,7 @@ bool NavigationMapManager::renderMap() {
         _displayCourseDeg = _stableCourseValid ? _stableCourseDeg : 0.0F;
         _displayCourseValid = true;
     } else if (_stableCourseValid) {
-        const float delta = shortestAngleDelta(_displayCourseDeg, _stableCourseDeg);
+        const float delta = NavMath::shortestAngleDelta(_displayCourseDeg, _stableCourseDeg);
         if (fabsf(delta) >= 1.0F) {
             _displayCourseDeg = fmodf(_displayCourseDeg + delta * 0.35F + 360.0F, 360.0F);
         }
@@ -740,6 +766,11 @@ void NavigationMapManager::drawWrappedRoadName(const String& road,
 }
 
 void NavigationMapManager::showFallback() {
+    const uint32_t seq = _navigation.sequence != 0 ? _navigation.sequence : 1;
+    if (_fallbackSequence == seq) {
+        return;
+    }
+    _fallbackSequence = seq;
     _showingMap = false;
     _display->device().fillScreen(0x0841);
     _display->device().fillRect(0, 0, DisplayConfig::kWidth, 24, TFT_BLACK);
@@ -849,125 +880,115 @@ void NavigationMapManager::queueMissingTile(const TileKey* tiles,
     }
 }
 
-bool NavigationMapManager::downloadBusy() {
-    bool busy = false;
-    portENTER_CRITICAL(&_taskMux);
-    busy = _jobPending || _jobActive || _resultPending;
-    portEXIT_CRITICAL(&_taskMux);
-    return busy;
+bool NavigationMapManager::downloadBusy() const {
+    return _tileInFlight || OtaGuard::isActive();
 }
 
-bool NavigationMapManager::tileBusy(const TileKey& tile) {
-    bool busy = false;
-    portENTER_CRITICAL(&_taskMux);
-    busy = (_jobPending && sameTile(_jobTile, tile)) ||
-           (_jobActive && sameTile(_activeTile, tile));
-    portEXIT_CRITICAL(&_taskMux);
-    return busy;
+bool NavigationMapManager::tileBusy(const TileKey& tile) const {
+    return _tileInFlight && sameTile(_activeTile, tile);
 }
 
 bool NavigationMapManager::enqueueTile(const TileKey& tile) {
-    bool queued = false;
-    portENTER_CRITICAL(&_taskMux);
-    if (!_jobPending && !_jobActive && !_resultPending) {
-        _jobTile = tile;
-        _jobPending = true;
-        queued = true;
+    if (_tileInFlight || _tileJobQueue == nullptr || OtaGuard::isActive()) {
+        return false;
     }
-    portEXIT_CRITICAL(&_taskMux);
-    return queued;
+    const uint8_t bufIdx = _nextBufferIndex;
+    if (_downloadBuffers[bufIdx] == nullptr) {
+        return false;
+    }
+    TileJob job{};
+    job.tile = tile;
+    job.bufferIndex = bufIdx;
+    if (xQueueSend(_tileJobQueue, &job, 0) != pdTRUE) {
+        return false;
+    }
+    _nextBufferIndex = (_nextBufferIndex + 1U) & 1U;
+    _tileInFlight = true;
+    _activeTile = tile;
+    return true;
 }
 
 void NavigationMapManager::processDownloadResult() {
-    bool hasResult = false;
-    bool ok = false;
-    TileKey tile;
-    size_t size = 0;
-    char error[48]{};
-    portENTER_CRITICAL(&_taskMux);
-    if (_resultPending) {
-        hasResult = true;
-        ok = _resultOk;
-        tile = _resultTile;
-        size = _resultSize;
-        strncpy(error, _resultError, sizeof(error) - 1);
-        _resultPending = false;
-    }
-    portEXIT_CRITICAL(&_taskMux);
-    if (!hasResult) return;
+    if (_tileResultQueue == nullptr) return;
+    TileResult result{};
+    while (xQueueReceive(_tileResultQueue, &result, 0) == pdTRUE) {
+        _tileInFlight = false;
+        const uint8_t* pngBuf = result.bufferIndex < 2 ? _downloadBuffers[result.bufferIndex] : nullptr;
 
-    if (ok && size > 0 && _downloadBuffer != nullptr) {
-        // Eviction strategy: Prefer invalid slots, then slots not currently visible on screen
-        TileKey currentVisible[kMaximumVisibleTiles];
-        uint8_t currentVisCount = 0;
-        TileKey currentCenter;
-        double currentVx = 0.0, currentVy = 0.0;
-        const bool hasVisible = collectVisibleTiles(currentVisible, currentVisCount, currentCenter, currentVx, currentVy);
+        if (result.ok && result.size > 0 && pngBuf != nullptr) {
+            // Eviction strategy: Prefer invalid slots, then slots not currently visible on screen
+            TileKey currentVisible[kMaximumVisibleTiles];
+            uint8_t currentVisCount = 0;
+            TileKey currentCenter;
+            double currentVx = 0.0, currentVy = 0.0;
+            const bool hasVisible = collectVisibleTiles(currentVisible, currentVisCount, currentCenter, currentVx, currentVy);
 
-        size_t lruIndex = 0;
-        uint32_t oldestTime = UINT32_MAX;
-        bool foundNonVisible = false;
+            size_t lruIndex = 0;
+            uint32_t oldestTime = UINT32_MAX;
+            bool foundNonVisible = false;
 
-        for (size_t i = 0; i < kPsramTileCacheSize; ++i) {
-            if (!_psramTileCache[i].valid) {
-                lruIndex = i;
-                foundNonVisible = true;
-                break;
-            }
+            for (size_t i = 0; i < kPsramTileCacheSize; ++i) {
+                if (!_psramTileCache[i].valid) {
+                    lruIndex = i;
+                    foundNonVisible = true;
+                    break;
+                }
 
-            bool isVisible = false;
-            if (hasVisible) {
-                for (uint8_t v = 0; v < currentVisCount; ++v) {
-                    if (sameTile(_psramTileCache[i].key, currentVisible[v])) {
-                        isVisible = true;
-                        break;
+                bool isVisible = false;
+                if (hasVisible) {
+                    for (uint8_t v = 0; v < currentVisCount; ++v) {
+                        if (sameTile(_psramTileCache[i].key, currentVisible[v])) {
+                            isVisible = true;
+                            break;
+                        }
+                    }
+                }
+
+                if (!isVisible) {
+                    if (!foundNonVisible || _psramTileCache[i].lastAccess < oldestTime) {
+                        oldestTime = _psramTileCache[i].lastAccess;
+                        lruIndex = i;
+                        foundNonVisible = true;
+                    }
+                } else if (!foundNonVisible) {
+                    if (_psramTileCache[i].lastAccess < oldestTime) {
+                        oldestTime = _psramTileCache[i].lastAccess;
+                        lruIndex = i;
                     }
                 }
             }
 
-            if (!isVisible) {
-                if (!foundNonVisible || _psramTileCache[i].lastAccess < oldestTime) {
-                    oldestTime = _psramTileCache[i].lastAccess;
-                    lruIndex = i;
-                    foundNonVisible = true;
-                }
-            } else if (!foundNonVisible) {
-                if (_psramTileCache[i].lastAccess < oldestTime) {
-                    oldestTime = _psramTileCache[i].lastAccess;
-                    lruIndex = i;
-                }
+            CachedTile& slot = _psramTileCache[lruIndex];
+            if (slot.sprite.drawPng(pngBuf, result.size, 0, 0)) {
+                slot.key = result.tile;
+                slot.lastAccess = millis();
+                slot.valid = true;
+                _dirty = true;
+                _failedTileValid = false;
+                _lastError = "";
+                Serial.printf("[MAP] Tile decoded to PSRAM: z%u/%ld/%ld (%u bytes)\n",
+                              result.tile.zoom,
+                              static_cast<long>(result.tile.x),
+                              static_cast<long>(result.tile.y),
+                              static_cast<unsigned>(result.size));
+            } else {
+                Serial.printf("[MAP] Decode PNG failed in PSRAM for tile: z%u/%ld/%ld\n",
+                              result.tile.zoom,
+                              static_cast<long>(result.tile.x),
+                              static_cast<long>(result.tile.y));
+                slot.valid = false;
             }
-        }
-
-        CachedTile& slot = _psramTileCache[lruIndex];
-        if (slot.sprite.drawPng(_downloadBuffer, size, 0, 0)) {
-            slot.key = tile;
-            slot.lastAccess = millis();
-            slot.valid = true;
-            _dirty = true;
-            _failedTileValid = false;
-            _lastError = "";
-            Serial.printf("[MAP] Tile streamed to PSRAM: z%u/%ld/%ld (%u bytes)\n",
-                          tile.zoom,
-                          static_cast<long>(tile.x),
-                          static_cast<long>(tile.y),
-                          static_cast<unsigned>(size));
-            saveOfflineTile(tile, _downloadBuffer, size);
         } else {
-            Serial.printf("[MAP] Decode PNG failed in PSRAM for tile: z%u/%ld/%ld\n",
-                          tile.zoom, static_cast<long>(tile.x), static_cast<long>(tile.y));
-            slot.valid = false;
+            _failedTile = result.tile;
+            _failedTileValid = true;
+            _failedRetryAtMs = millis() + kFailedTileRetryMs;
+            _lastError = result.error[0] ? result.error : "map_tile_download_failed";
+            Serial.printf("[MAP] Tile download failed: z%u/%ld/%ld (%s)\n",
+                          result.tile.zoom,
+                          static_cast<long>(result.tile.x),
+                          static_cast<long>(result.tile.y),
+                          _lastError.c_str());
         }
-    } else {
-        _failedTile = tile;
-        _failedTileValid = true;
-        _failedRetryAtMs = millis() + kFailedTileRetryMs;
-        _lastError = error[0] ? error : "map_tile_download_failed";
-        Serial.printf("[MAP] Tile download failed: z%u/%ld/%ld (%s)\n",
-                      tile.zoom,
-                      static_cast<long>(tile.x),
-                      static_cast<long>(tile.y),
-                      _lastError.c_str());
     }
 }
 
@@ -977,47 +998,61 @@ void NavigationMapManager::downloadTaskThunk(void* parameter) {
 }
 
 void NavigationMapManager::downloadLoop() {
+    TileJob job{};
     for (;;) {
-        bool hasJob = false;
-        TileKey tile;
-        portENTER_CRITICAL(&_taskMux);
-        if (_jobPending) {
-            tile = _jobTile;
-            _jobPending = false;
-            _jobActive = true;
-            _activeTile = tile;
-            hasJob = true;
-        }
-        portEXIT_CRITICAL(&_taskMux);
-
-        if (!hasJob) {
-            vTaskDelay(pdMS_TO_TICKS(40));
+        if (xQueueReceive(_tileJobQueue, &job, portMAX_DELAY) != pdTRUE) {
             continue;
         }
 
+        TileResult result{};
+        result.tile = job.tile;
+        result.bufferIndex = job.bufferIndex;
+
+        if (OtaGuard::isActive()) {
+            strncpy(result.error, "ota_in_progress", sizeof(result.error) - 1);
+            xQueueSend(_tileResultQueue, &result, portMAX_DELAY);
+            continue;
+        }
+
+        uint8_t* targetBuf = job.bufferIndex < 2 ? _downloadBuffers[job.bufferIndex] : nullptr;
         String error;
         size_t received = 0;
-        const bool ok = downloadTile(tile, received, error);
-        portENTER_CRITICAL(&_taskMux);
-        _jobActive = false;
-        _resultTile = tile;
-        _resultSize = received;
-        _resultOk = ok;
-        strncpy(_resultError, error.c_str(), sizeof(_resultError) - 1);
-        _resultError[sizeof(_resultError) - 1] = '\0';
-        _resultPending = true;
-        portEXIT_CRITICAL(&_taskMux);
+        const bool ok = downloadTile(job.tile, targetBuf, received, error);
+        if (ok && received > 0 && !OtaGuard::isActive()) {
+            // Persist offline tile directly on Core 0 under FsLock so Core 1 never blocks on Flash writes
+            writeOfflineTileFile(job.tile, targetBuf, received);
+        }
+
+        result.ok = ok;
+        result.size = received;
+        strncpy(result.error, error.c_str(), sizeof(result.error) - 1);
+        result.error[sizeof(result.error) - 1] = '\0';
+        xQueueSend(_tileResultQueue, &result, portMAX_DELAY);
     }
 }
 
-bool NavigationMapManager::downloadTile(const TileKey& tile, size_t& receivedBytes, String& error) {
+bool NavigationMapManager::downloadTile(const TileKey& tile,
+                                        uint8_t* buffer,
+                                        size_t& receivedBytes,
+                                        String& error) {
     receivedBytes = 0;
-    if (_downloadBuffer == nullptr) {
+    if (buffer == nullptr) {
         error = "no_download_buffer";
+        return false;
+    }
+    if (OtaGuard::isActive()) {
+        error = "ota_in_progress";
         return false;
     }
     if (WiFi.status() != WL_CONNECTED) {
         error = "map_offline";
+        return false;
+    }
+
+    // Serialize heavy TLS handshakes across Core 0 tasks
+    NetTlsGate tlsGate(pdMS_TO_TICKS(10000));
+    if (!tlsGate.acquired()) {
+        error = "map_tls_busy";
         return false;
     }
 
@@ -1077,6 +1112,11 @@ bool NavigationMapManager::downloadTile(const TileKey& tile, size_t& receivedByt
     bool readOk = true;
 
     while (remaining != 0) {
+        if (OtaGuard::isActive()) {
+            readOk = false;
+            error = "ota_in_progress";
+            break;
+        }
         const size_t available = stream->available();
         if (available > 0) {
             size_t request = available > 1024 ? 1024 : available;
@@ -1088,7 +1128,7 @@ bool NavigationMapManager::downloadTile(const TileKey& tile, size_t& receivedByt
                 error = "map_tile_too_large";
                 break;
             }
-            const int received = stream->readBytes(_downloadBuffer + total, request);
+            const int received = stream->readBytes(buffer + total, request);
             if (received <= 0) {
                 readOk = false;
                 error = "map_tile_read_failed";
@@ -1111,7 +1151,7 @@ bool NavigationMapManager::downloadTile(const TileKey& tile, size_t& receivedByt
     http.end();
 
     const uint8_t pngSignature[8] = {0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A};
-    if (!readOk || total < 64 || memcmp(_downloadBuffer, pngSignature, sizeof(pngSignature)) != 0 ||
+    if (!readOk || total < 64 || memcmp(buffer, pngSignature, sizeof(pngSignature)) != 0 ||
         (contentLength >= 0 && total != static_cast<size_t>(contentLength))) {
         if (!error.length()) error = "map_tile_invalid_png";
         return false;

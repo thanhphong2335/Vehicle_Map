@@ -4,15 +4,15 @@
 #include <HTTPClient.h>
 #include <WiFi.h>
 #include <cfloat>
-#include <math.h>
+#include <cstring>
 
 #include "GpsManager.h"
 #include "SettingsStore.h"
+#include "SyncGuards.h"
 
 namespace {
-// HTTP is intentional here: the OSRM server rejects the TLS handshake offered
-// by this ESP32 Arduino build. The user accepted the unencrypted route request
-// for this prototype, so only the route API uses port 80.
+// HTTP is intentional here: the OSRM public endpoint rejects the TLS handshake offered
+// by this ESP32 Arduino build. Only the route API uses port 80.
 constexpr char kOsrmBaseUrl[] = "http://router.project-osrm.org/route/v1/driving/";
 constexpr char kOsrmHost[] = "router.project-osrm.org";
 constexpr char kFallbackOsrmBaseUrl[] = "http://routing.openstreetmap.de/routed-car/route/v1/driving/";
@@ -24,59 +24,31 @@ constexpr float kStepAdvanceDistanceM = 30.0F;
 constexpr float kArrivalDistanceM = 25.0F;
 constexpr float kOffRouteDistanceM = 60.0F;
 constexpr uint8_t kOffRouteFixCount = 3;
-constexpr double kEarthRadiusM = 6371000.0;
+constexpr uint32_t kRouteTaskStack = 8192;
+constexpr UBaseType_t kRouteTaskPriority = 2;
+constexpr BaseType_t kRouteTaskCore = 0;
 
-double radiansFromDegrees(double degrees) {
-    return degrees * DEG_TO_RAD;
-}
-
-float distanceMeters(double lat1, double lon1, double lat2, double lon2) {
-    const double dLat = radiansFromDegrees(lat2 - lat1);
-    const double dLon = radiansFromDegrees(lon2 - lon1);
-    const double a = sin(dLat / 2.0) * sin(dLat / 2.0) +
-                     cos(radiansFromDegrees(lat1)) * cos(radiansFromDegrees(lat2)) *
-                     sin(dLon / 2.0) * sin(dLon / 2.0);
-    return static_cast<float>(kEarthRadiusM * 2.0 * atan2(sqrt(a), sqrt(1.0 - a)));
-}
-
-float pointToSegmentMeters(double latitude,
-                           double longitude,
-                           double startLatitude,
-                           double startLongitude,
-                           double endLatitude,
-                           double endLongitude) {
-    const double latitudeRadians = radiansFromDegrees(latitude);
-    const double sx = radiansFromDegrees(startLongitude - longitude) * cos(latitudeRadians) * kEarthRadiusM;
-    const double sy = radiansFromDegrees(startLatitude - latitude) * kEarthRadiusM;
-    const double ex = radiansFromDegrees(endLongitude - longitude) * cos(latitudeRadians) * kEarthRadiusM;
-    const double ey = radiansFromDegrees(endLatitude - latitude) * kEarthRadiusM;
-    const double dx = ex - sx;
-    const double dy = ey - sy;
-    const double lengthSquared = dx * dx + dy * dy;
-    double projection = lengthSquared > 0.0001 ? -(sx * dx + sy * dy) / lengthSquared : 0.0;
-    if (projection < 0.0) projection = 0.0;
-    if (projection > 1.0) projection = 1.0;
-    const double px = sx + projection * dx;
-    const double py = sy + projection * dy;
-    return static_cast<float>(sqrt(px * px + py * py));
-}
-
-bool decodePolylineValue(const String& encoded, size_t& index, int32_t& value) {
-    int32_t result = 0;
-    uint8_t shift = 0;
-    while (index < encoded.length()) {
-        const int32_t byteValue = static_cast<int32_t>(encoded[index++]) - 63;
-        if (byteValue < 0) return false;
-        result |= (byteValue & 0x1F) << shift;
-        shift += 5;
-        if (byteValue < 0x20) {
-            value = (result & 1) ? ~(result >> 1) : (result >> 1);
-            return true;
+class RouteLock {
+public:
+    explicit RouteLock(SemaphoreHandle_t mutex, TickType_t ticks = pdMS_TO_TICKS(500))
+        : _mutex(mutex) {
+        if (_mutex != nullptr) {
+            _acquired = (xSemaphoreTakeRecursive(_mutex, ticks) == pdTRUE);
+        } else {
+            _acquired = true;
         }
-        if (shift > 30) return false;
     }
-    return false;
-}
+    ~RouteLock() {
+        if (_acquired && _mutex != nullptr) {
+            xSemaphoreGiveRecursive(_mutex);
+        }
+    }
+    bool locked() const { return _acquired; }
+
+private:
+    SemaphoreHandle_t _mutex;
+    bool _acquired = false;
+};
 
 Maneuver parseManeuver(const char* typeValue, const char* modifierValue) {
     String type(typeValue == nullptr ? "" : typeValue);
@@ -104,7 +76,7 @@ void copyUtf8RoadName(char* destination, size_t capacity, const char* source) {
     memcpy(destination, source, length);
     destination[length] = '\0';
 }
-}
+} // namespace
 
 RouteManager::RouteManager(GpsManager* gps, SettingsStore* settings)
     : _gps(gps), _settings(settings) {
@@ -112,10 +84,45 @@ RouteManager::RouteManager(GpsManager* gps, SettingsStore* settings)
     _routeSteps.reserve(kMaximumRouteSteps);
 }
 
+RouteManager::~RouteManager() {
+    if (_routeTask != nullptr) {
+        vTaskDelete(_routeTask);
+        _routeTask = nullptr;
+    }
+    if (_routeQueue != nullptr) {
+        vQueueDelete(_routeQueue);
+        _routeQueue = nullptr;
+    }
+    if (_mutex != nullptr) {
+        vSemaphoreDelete(_mutex);
+        _mutex = nullptr;
+    }
+}
+
 void RouteManager::begin(NavigationUpdateCallback callback) {
     _callback = callback;
-    _destination = _settings != nullptr ? _settings->loadDestination() : DestinationData{};
-    _state = _destination.valid && _destination.active ? RouteState::WaitingGps : RouteState::Idle;
+    if (_mutex == nullptr) {
+        _mutex = xSemaphoreCreateRecursiveMutex();
+    }
+    if (_routeQueue == nullptr) {
+        _routeQueue = xQueueCreate(2, sizeof(RouteFetchJob));
+    }
+    if (_routeTask == nullptr && _routeQueue != nullptr) {
+        xTaskCreatePinnedToCore(
+            routeTaskThunk,
+            "RouteTask",
+            kRouteTaskStack,
+            this,
+            kRouteTaskPriority,
+            &_routeTask,
+            kRouteTaskCore);
+    }
+
+    {
+        RouteLock lock(_mutex);
+        _destination = _settings != nullptr ? _settings->loadDestination() : DestinationData{};
+        _state = _destination.valid && _destination.active ? RouteState::WaitingGps : RouteState::Idle;
+    }
     if (_state == RouteState::WaitingGps) {
         const GpsSnapshot position = _gps != nullptr ? _gps->snapshot() : GpsSnapshot{};
         emitNavigation(NavigationState::Start, "WAITING FOR GPS", &position);
@@ -130,61 +137,184 @@ bool RouteManager::setDestination(const DestinationData& destination, String* er
     }
 
     DestinationData saved = destination;
-    saved.active = true;
     saved.vehicle = saved.vehicle == "car" ? "car" : "motorcycle";
     if (_settings != nullptr && !_settings->saveDestination(saved)) {
         if (error != nullptr) *error = "destination_save_failed";
         return false;
     }
 
+    RouteLock lock(_mutex);
+    if (!lock.locked()) {
+        if (error != nullptr) *error = "route_lock_timeout";
+        return false;
+    }
     _destination = saved;
-    _routePoints.clear();
-    _routeSteps.clear();
-    ++_routeRevision;
-    _currentStepIndex = 0;
+    ++_generation;
+    _pendingResult.ready = false;
+    _fetchInFlight = false;
     _hasRoute = false;
     _rerouteRequested = false;
     _offRouteFixes = 0;
     _lastError = "";
-    _state = RouteState::WaitingGps;
+    _state = saved.active ? RouteState::WaitingGps : RouteState::Idle;
     _nextRouteAttemptMs = 0;
-    const GpsSnapshot position = _gps != nullptr ? _gps->snapshot() : GpsSnapshot{};
-    emitNavigation(NavigationState::Start, "WAITING FOR GPS", &position);
+    _pendingControl = saved.active ? PendingControl::StartDestination : PendingControl::Stop;
     return true;
 }
 
 void RouteManager::stop() {
-    _destination.active = false;
     if (_settings != nullptr) _settings->setDestinationActive(false);
-    _routePoints.clear();
-    _routeSteps.clear();
-    ++_routeRevision;
+
+    RouteLock lock(_mutex);
+    if (!lock.locked()) return;
+    _destination.active = false;
+    ++_generation;
+    _pendingResult.ready = false;
+    _fetchInFlight = false;
     _hasRoute = false;
     _rerouteRequested = false;
     _state = RouteState::Idle;
-    NavigationData data;
-    data.state = NavigationState::Stop;
-    data.sequence = ++_sequence;
-    _lastUpdateMs = millis();
-    _currentNavigation = data;
-    if (_callback != nullptr) _callback(data);
+    _pendingControl = PendingControl::Stop;
 }
 
 void RouteManager::requestReroute() {
-    if (!_destination.valid || !_destination.active) return;
+    RouteLock lock(_mutex);
+    if (!lock.locked() || !_destination.valid || !_destination.active) return;
+    ++_generation;
+    _pendingResult.ready = false;
+    _fetchInFlight = false;
     _rerouteRequested = true;
     _state = RouteState::OffRoute;
     _nextRouteAttemptMs = 0;
-    const GpsSnapshot position = _gps != nullptr ? _gps->snapshot() : GpsSnapshot{};
-    emitNavigation(NavigationState::OffRoute, "REROUTE REQUESTED", &position);
+    _pendingControl = PendingControl::Reroute;
+}
+
+void RouteManager::applyPendingControlAndResult(const GpsSnapshot& position) {
+    PendingControl control = PendingControl::None;
+    bool hasResult = false;
+    PendingRouteResult resultCopy;
+
+    {
+        RouteLock lock(_mutex);
+        if (!lock.locked()) return;
+        control = _pendingControl;
+        _pendingControl = PendingControl::None;
+
+        if (_pendingResult.ready) {
+            if (_pendingResult.generation == _generation) {
+                hasResult = true;
+                resultCopy.ok = _pendingResult.ok;
+                resultCopy.isReroute = _pendingResult.isReroute;
+                resultCopy.generation = _pendingResult.generation;
+                resultCopy.distanceM = _pendingResult.distanceM;
+                resultCopy.durationS = _pendingResult.durationS;
+                strncpy(resultCopy.error, _pendingResult.error, sizeof(resultCopy.error) - 1);
+                resultCopy.points.swap(_pendingResult.points);
+                resultCopy.steps.swap(_pendingResult.steps);
+                resultCopy.startPosition = _pendingResult.startPosition;
+            }
+            _pendingResult.ready = false;
+            _pendingResult.points.clear();
+            _pendingResult.steps.clear();
+        }
+    }
+
+    if (control == PendingControl::Stop) {
+        _routePoints.clear();
+        _routeSteps.clear();
+        _currentStepIndex = 0;
+        _nearestRouteIndex = 0;
+        ++_routeRevision;
+        NavigationData data;
+        data.state = NavigationState::Stop;
+        {
+            RouteLock lock(_mutex);
+            data.sequence = ++_sequence;
+            _lastUpdateMs = millis();
+            _currentNavigation = data;
+        }
+        if (_callback != nullptr) _callback(data);
+        return;
+    }
+
+    if (control == PendingControl::StartDestination) {
+        _routePoints.clear();
+        _routeSteps.clear();
+        _currentStepIndex = 0;
+        _nearestRouteIndex = 0;
+        ++_routeRevision;
+        emitNavigation(NavigationState::Start, "WAITING FOR GPS", &position);
+    } else if (control == PendingControl::Reroute) {
+        emitNavigation(NavigationState::OffRoute, "REROUTE REQUESTED", &position);
+    }
+
+    if (hasResult) {
+        if (resultCopy.ok) {
+            _routePoints.swap(resultCopy.points);
+            _routeSteps.swap(resultCopy.steps);
+            _routeDistanceM = resultCopy.distanceM;
+            _routeDurationS = resultCopy.durationS;
+            _currentStepIndex = 0;
+            while (_currentStepIndex + 1 < _routeSteps.size() && _routeSteps[_currentStepIndex].depart) {
+                ++_currentStepIndex;
+            }
+            _nearestRouteIndex = 0;
+            {
+                RouteLock lock(_mutex);
+                _hasRoute = true;
+                ++_routeRevision;
+                _lastError = "";
+                _state = RouteState::Navigating;
+                _rerouteRequested = false;
+                _offRouteFixes = 0;
+                _lastRerouteMs = millis();
+            }
+            emitNavigation(NavigationState::Start, "NAVIGATION", &position);
+        } else {
+            {
+                RouteLock lock(_mutex);
+                _lastError = resultCopy.error;
+                _state = RouteState::Error;
+                _nextRouteAttemptMs = millis() + kRouteRetryMs;
+                if (resultCopy.isReroute) {
+                    _lastRerouteMs = millis();
+                }
+            }
+            emitNavigation(NavigationState::OffRoute, "ROUTE ERROR - RETRY", &position);
+        }
+    }
 }
 
 void RouteManager::loop(bool internetConnected) {
-    if (!_destination.valid || !_destination.active || _gps == nullptr) return;
-
+    if (_gps == nullptr) return;
     const GpsSnapshot position = _gps->snapshot();
+
+    applyPendingControlAndResult(position);
+
+    DestinationData dest;
+    bool hasRouteVal = false;
+    bool rerouteVal = false;
+    bool inFlight = false;
+    uint32_t nextAttempt = 0;
+    uint32_t gen = 0;
+    {
+        RouteLock lock(_mutex);
+        if (!lock.locked()) return;
+        dest = _destination;
+        hasRouteVal = _hasRoute;
+        rerouteVal = _rerouteRequested;
+        inFlight = _fetchInFlight;
+        nextAttempt = _nextRouteAttemptMs;
+        gen = _generation;
+    }
+
+    if (!dest.valid || !dest.active) return;
+
     if (!position.valid) {
-        _state = RouteState::WaitingGps;
+        {
+            RouteLock lock(_mutex);
+            _state = RouteState::WaitingGps;
+        }
         if (millis() - _lastWaitingDisplayMs >= 3000) {
             _lastWaitingDisplayMs = millis();
             emitNavigation(NavigationState::Update, "WAITING FOR GPS", &position);
@@ -196,47 +326,110 @@ void RouteManager::loop(bool internetConnected) {
     const bool newFix = fixSequence != _lastFixSequence;
     if (newFix) _lastFixSequence = fixSequence;
 
-    const bool routeNeeded = !_hasRoute || _rerouteRequested;
-    if (routeNeeded && static_cast<int32_t>(millis() - _nextRouteAttemptMs) >= 0) {
+    const bool routeNeeded = !hasRouteVal || rerouteVal;
+    if (routeNeeded && !inFlight && !OtaGuard::isActive() &&
+        static_cast<int32_t>(millis() - nextAttempt) >= 0) {
         if (!internetConnected) {
-            _state = _rerouteRequested ? RouteState::OffRoute : RouteState::WaitingGps;
+            {
+                RouteLock lock(_mutex);
+                _state = rerouteVal ? RouteState::OffRoute : RouteState::WaitingGps;
+            }
             if (newFix) emitNavigation(NavigationState::OffRoute, "OFFLINE - WAITING", &position);
             return;
         }
 
-        _state = RouteState::Requesting;
-        emitNavigation(_rerouteRequested ? NavigationState::OffRoute : NavigationState::Start,
-                       "CALCULATING ROUTE",
-                       &position);
-        String error;
-        if (fetchRoute(position, error)) {
-            _state = RouteState::Navigating;
-            _rerouteRequested = false;
-            _offRouteFixes = 0;
-            _lastRerouteMs = millis();
-            emitNavigation(NavigationState::Start, "NAVIGATION", &position);
-        } else {
-            _lastError = error;
-            _state = RouteState::Error;
-            _nextRouteAttemptMs = millis() + kRouteRetryMs;
-            emitNavigation(NavigationState::OffRoute, "ROUTE ERROR - RETRY", &position);
+        RouteFetchJob job{};
+        job.startLat = position.latitude;
+        job.startLon = position.longitude;
+        job.destLat = dest.latitude;
+        job.destLon = dest.longitude;
+        job.generation = gen;
+        job.isReroute = rerouteVal;
+
+        if (_routeQueue != nullptr && xQueueSend(_routeQueue, &job, 0) == pdTRUE) {
+            {
+                RouteLock lock(_mutex);
+                _fetchInFlight = true;
+                _state = RouteState::Requesting;
+                if (rerouteVal) {
+                    _lastRerouteMs = millis();
+                }
+            }
+            emitNavigation(rerouteVal ? NavigationState::OffRoute : NavigationState::Start,
+                           "CALCULATING ROUTE",
+                           &position);
         }
         return;
     }
 
-    if (_hasRoute && newFix) {
+    if (hasRouteVal && newFix) {
         updateForPosition(position, internetConnected);
     }
 }
 
-bool RouteManager::fetchRoute(const GpsSnapshot& position, String& error) {
+void RouteManager::routeTaskThunk(void* parameter) {
+    auto* self = static_cast<RouteManager*>(parameter);
+    self->routeWorkerLoop();
+}
+
+void RouteManager::routeWorkerLoop() {
+    RouteFetchJob job{};
+    for (;;) {
+        if (xQueueReceive(_routeQueue, &job, portMAX_DELAY) != pdTRUE) {
+            continue;
+        }
+
+        if (OtaGuard::isActive()) {
+            RouteLock lock(_mutex);
+            if (lock.locked() && job.generation == _generation) {
+                _fetchInFlight = false;
+                _nextRouteAttemptMs = millis() + 2000;
+            }
+            continue;
+        }
+
+        std::vector<RoutePoint> points;
+        std::vector<RouteStep> steps;
+        points.reserve(kMaximumRoutePoints);
+        steps.reserve(kMaximumRouteSteps);
+        float distanceM = 0.0F;
+        float durationS = 0.0F;
+        char error[64]{};
+
+        const bool ok = fetchRouteInternal(
+            job, points, steps, distanceM, durationS, error, sizeof(error));
+
+        RouteLock lock(_mutex);
+        if (lock.locked()) {
+            _fetchInFlight = false;
+            if (job.generation == _generation) {
+                _pendingResult.ok = ok;
+                _pendingResult.isReroute = job.isReroute;
+                _pendingResult.generation = job.generation;
+                _pendingResult.distanceM = distanceM;
+                _pendingResult.durationS = durationS;
+                strncpy(_pendingResult.error, error, sizeof(_pendingResult.error) - 1);
+                _pendingResult.error[sizeof(_pendingResult.error) - 1] = '\0';
+                _pendingResult.points.swap(points);
+                _pendingResult.steps.swap(steps);
+                _pendingResult.ready = true;
+            }
+        }
+    }
+}
+
+bool RouteManager::fetchRouteInternal(const RouteFetchJob& job,
+                                      std::vector<RoutePoint>& points,
+                                      std::vector<RouteStep>& steps,
+                                      float& distanceM,
+                                      float& durationS,
+                                      char* outError,
+                                      size_t outErrorSize) const {
     struct RouteServer {
         const char* name;
         const char* host;
         const char* baseUrl;
     };
-    // Both endpoints expose the OSRM-compatible route API. Keep the retry so
-    // a temporary failure at one hostname does not stop navigation.
     const RouteServer servers[] = {
         {"fallback", kFallbackOsrmHost, kFallbackOsrmBaseUrl},
         {"primary", kOsrmHost, kOsrmBaseUrl},
@@ -244,6 +437,17 @@ bool RouteManager::fetchRoute(const GpsSnapshot& position, String& error) {
 
     String lastError = "osrm_no_server";
     for (const RouteServer& server : servers) {
+        if (OtaGuard::isActive()) {
+            lastError = "ota_in_progress";
+            break;
+        }
+
+        NetTlsGate netGate(pdMS_TO_TICKS(15000));
+        if (!netGate.acquired()) {
+            lastError = "net_gate_timeout";
+            continue;
+        }
+
         IPAddress resolvedIp;
         if (WiFi.hostByName(server.host, resolvedIp) != 1) {
             lastError = String("osrm_") + server.name + "_dns_failed";
@@ -258,13 +462,13 @@ bool RouteManager::fetchRoute(const GpsSnapshot& position, String& error) {
         String url;
         url.reserve(290);
         url += server.baseUrl;
-        url += String(position.longitude, 6);
+        url += String(job.startLon, 6);
         url += ',';
-        url += String(position.latitude, 6);
+        url += String(job.startLat, 6);
         url += ';';
-        url += String(_destination.longitude, 6);
+        url += String(job.destLon, 6);
         url += ',';
-        url += String(_destination.latitude, 6);
+        url += String(job.destLat, 6);
         url += "?steps=true&overview=simplified&geometries=polyline6&alternatives=false";
 
         WiFiClient client;
@@ -289,12 +493,8 @@ bool RouteManager::fetchRoute(const GpsSnapshot& position, String& error) {
             continue;
         }
 
-        std::vector<RoutePoint> points;
-        std::vector<RouteStep> steps;
-        points.reserve(kMaximumRoutePoints);
-        steps.reserve(kMaximumRouteSteps);
-        float distanceM = 0.0F;
-        float durationS = 0.0F;
+        points.clear();
+        steps.clear();
         String parseError;
         const bool ok = parseRouteResponse(http.getStream(), points, steps, distanceM, durationS, parseError);
         http.end();
@@ -304,23 +504,15 @@ bool RouteManager::fetchRoute(const GpsSnapshot& position, String& error) {
             continue;
         }
 
-        _routePoints.swap(points);
-        _routeSteps.swap(steps);
-        _routeDistanceM = distanceM;
-        _routeDurationS = durationS;
-        _currentStepIndex = 0;
-        while (_currentStepIndex + 1 < _routeSteps.size() && _routeSteps[_currentStepIndex].depart) {
-            ++_currentStepIndex;
-        }
-        _nearestRouteIndex = 0;
-        _hasRoute = true;
-        ++_routeRevision;
-        _lastError = "";
         Serial.printf("Route %s: OK, %.0fm, %.0fs\n", server.name, distanceM, durationS);
+        if (outError != nullptr && outErrorSize > 0) outError[0] = '\0';
         return true;
     }
 
-    error = lastError;
+    if (outError != nullptr && outErrorSize > 0) {
+        strncpy(outError, lastError.c_str(), outErrorSize - 1);
+        outError[outErrorSize - 1] = '\0';
+    }
     return false;
 }
 
@@ -329,7 +521,7 @@ bool RouteManager::parseRouteResponse(Stream& stream,
                                       std::vector<RouteStep>& steps,
                                       float& distanceM,
                                       float& durationS,
-                                      String& error) {
+                                      String& error) const {
     JsonDocument filter;
     filter["code"] = true;
     filter["routes"][0]["distance"] = true;
@@ -358,8 +550,10 @@ bool RouteManager::parseRouteResponse(Stream& stream,
 
     JsonObject route = document["routes"][0];
     const char* geometryValue = route["geometry"] | "";
-    if (geometryValue[0] == '\0' || !decodePolyline6(String(geometryValue), points, error)) {
-        if (error.length() == 0) error = "route_geometry_missing";
+    const size_t geomLen = strlen(geometryValue);
+    const char* polyErr = nullptr;
+    if (geomLen == 0 || !NavMath::decodePolyline6(geometryValue, geomLen, points, kMaximumRoutePoints, &polyErr)) {
+        error = polyErr != nullptr ? polyErr : "route_geometry_missing";
         return false;
     }
 
@@ -396,64 +590,6 @@ bool RouteManager::parseRouteResponse(Stream& stream,
     return true;
 }
 
-bool RouteManager::decodePolyline6(const String& encoded,
-                                   std::vector<RoutePoint>& points,
-                                   String& error) const {
-    size_t index = 0;
-    size_t pointCount = 0;
-    int32_t latitude = 0;
-    int32_t longitude = 0;
-    while (index < encoded.length()) {
-        int32_t deltaLatitude = 0;
-        int32_t deltaLongitude = 0;
-        if (!decodePolylineValue(encoded, index, deltaLatitude) ||
-            !decodePolylineValue(encoded, index, deltaLongitude)) {
-            error = "invalid_polyline6";
-            return false;
-        }
-        latitude += deltaLatitude;
-        longitude += deltaLongitude;
-        ++pointCount;
-    }
-    if (pointCount < 2) {
-        error = "route_geometry_short";
-        return false;
-    }
-
-    const size_t stride = (pointCount + kMaximumRoutePoints - 1) / kMaximumRoutePoints;
-    index = 0;
-    latitude = 0;
-    longitude = 0;
-    size_t rawIndex = 0;
-    RoutePoint finalPoint;
-    while (index < encoded.length()) {
-        int32_t deltaLatitude = 0;
-        int32_t deltaLongitude = 0;
-        decodePolylineValue(encoded, index, deltaLatitude);
-        decodePolylineValue(encoded, index, deltaLongitude);
-        latitude += deltaLatitude;
-        longitude += deltaLongitude;
-        finalPoint.latitude = static_cast<float>(latitude / 1000000.0);
-        finalPoint.longitude = static_cast<float>(longitude / 1000000.0);
-        if (rawIndex % stride == 0 && points.size() < kMaximumRoutePoints) {
-            points.push_back(finalPoint);
-        }
-        ++rawIndex;
-    }
-    if (points.empty()) {
-        error = "route_geometry_empty";
-        return false;
-    }
-    if (distanceMeters(points.back().latitude,
-                       points.back().longitude,
-                       finalPoint.latitude,
-                       finalPoint.longitude) > 1.0F) {
-        if (points.size() == kMaximumRoutePoints) points.back() = finalPoint;
-        else points.push_back(finalPoint);
-    }
-    return points.size() >= 2;
-}
-
 void RouteManager::matchStepRouteIndexes(std::vector<RouteStep>& steps,
                                          const std::vector<RoutePoint>& points) const {
     size_t searchStart = 0;
@@ -461,10 +597,10 @@ void RouteManager::matchStepRouteIndexes(std::vector<RouteStep>& steps,
         float bestDistance = FLT_MAX;
         size_t bestIndex = searchStart;
         for (size_t index = searchStart; index < points.size(); ++index) {
-            const float distance = distanceMeters(step.latitude,
-                                                  step.longitude,
-                                                  points[index].latitude,
-                                                  points[index].longitude);
+            const float distance = NavMath::distanceMeters(step.latitude,
+                                                           step.longitude,
+                                                           points[index].latitude,
+                                                           points[index].longitude);
             if (distance < bestDistance) {
                 bestDistance = distance;
                 bestIndex = index;
@@ -478,49 +614,79 @@ void RouteManager::matchStepRouteIndexes(std::vector<RouteStep>& steps,
 void RouteManager::updateForPosition(const GpsSnapshot& position, bool internetConnected) {
     if (_routePoints.size() < 2 || _routeSteps.empty()) return;
 
+    const size_t maxSeg = _routePoints.size() - 1;
+    const size_t winStart = _nearestRouteIndex > 8 ? (_nearestRouteIndex - 8) : 0;
+    const size_t winEnd = (_nearestRouteIndex + 48 < maxSeg) ? (_nearestRouteIndex + 48) : maxSeg;
+
     float nearestDistance = FLT_MAX;
-    size_t nearestIndex = 0;
-    for (size_t index = 0; index + 1 < _routePoints.size(); ++index) {
-        const float distance = pointToSegmentMeters(position.latitude,
-                                                    position.longitude,
-                                                    _routePoints[index].latitude,
-                                                    _routePoints[index].longitude,
-                                                    _routePoints[index + 1].latitude,
-                                                    _routePoints[index + 1].longitude);
+    size_t nearestIndex = _nearestRouteIndex < maxSeg ? _nearestRouteIndex : 0;
+    for (size_t index = winStart; index < winEnd; ++index) {
+        const float distance = NavMath::pointToSegmentMeters(position.latitude,
+                                                               position.longitude,
+                                                               _routePoints[index].latitude,
+                                                               _routePoints[index].longitude,
+                                                               _routePoints[index + 1].latitude,
+                                                               _routePoints[index + 1].longitude);
         if (distance < nearestDistance) {
             nearestDistance = distance;
             nearestIndex = index;
         }
     }
+
+    // Fall back to full scan only if vehicle jumped far outside the local window
+    if (nearestDistance > kOffRouteDistanceM && (winStart > 0 || winEnd < maxSeg)) {
+        for (size_t index = 0; index < maxSeg; ++index) {
+            if (index >= winStart && index < winEnd) continue;
+            const float distance = NavMath::pointToSegmentMeters(position.latitude,
+                                                                   position.longitude,
+                                                                   _routePoints[index].latitude,
+                                                                   _routePoints[index].longitude,
+                                                                   _routePoints[index + 1].latitude,
+                                                                   _routePoints[index + 1].longitude);
+            if (distance < nearestDistance) {
+                nearestDistance = distance;
+                nearestIndex = index;
+            }
+        }
+    }
     _nearestRouteIndex = static_cast<uint16_t>(nearestIndex);
 
-    const float destinationDistance = distanceMeters(position.latitude,
-                                                     position.longitude,
-                                                     _destination.latitude,
-                                                     _destination.longitude);
+    DestinationData destSnapshot;
+    {
+        RouteLock lock(_mutex);
+        destSnapshot = _destination;
+    }
+
+    const float destinationDistance = NavMath::distanceMeters(position.latitude,
+                                                              position.longitude,
+                                                              destSnapshot.latitude,
+                                                              destSnapshot.longitude);
     if (destinationDistance <= kArrivalDistanceM) {
-        _state = RouteState::Arrived;
-        _destination.active = false;
+        {
+            RouteLock lock(_mutex);
+            _state = RouteState::Arrived;
+            _destination.active = false;
+            _hasRoute = false;
+        }
         if (_settings != nullptr) _settings->setDestinationActive(false);
         emitNavigation(NavigationState::Arrived, "ARRIVED", &position);
-        _hasRoute = false;
         return;
     }
 
     RouteStep* step = &_routeSteps[_currentStepIndex];
-    float distanceToTurn = distanceMeters(position.latitude,
-                                          position.longitude,
-                                          step->latitude,
-                                          step->longitude);
+    float distanceToTurn = NavMath::distanceMeters(position.latitude,
+                                                   position.longitude,
+                                                   step->latitude,
+                                                   step->longitude);
     while (_currentStepIndex + 1 < _routeSteps.size() &&
            (distanceToTurn <= kStepAdvanceDistanceM ||
             _nearestRouteIndex > step->routeIndex + 2)) {
         ++_currentStepIndex;
         step = &_routeSteps[_currentStepIndex];
-        distanceToTurn = distanceMeters(position.latitude,
-                                        position.longitude,
-                                        step->latitude,
-                                        step->longitude);
+        distanceToTurn = NavMath::distanceMeters(position.latitude,
+                                                 position.longitude,
+                                                 step->latitude,
+                                                 step->longitude);
     }
 
     if (nearestDistance > kOffRouteDistanceM) {
@@ -531,16 +697,22 @@ void RouteManager::updateForPosition(const GpsSnapshot& position, bool internetC
 
     if (_offRouteFixes >= kOffRouteFixCount &&
         millis() - _lastRerouteMs >= kRerouteCooldownMs) {
-        _rerouteRequested = true;
-        _state = RouteState::OffRoute;
-        _nextRouteAttemptMs = 0;
+        {
+            RouteLock lock(_mutex);
+            _rerouteRequested = true;
+            _state = RouteState::OffRoute;
+            _nextRouteAttemptMs = 0;
+        }
         emitNavigation(NavigationState::OffRoute,
                        internetConnected ? "OFF ROUTE" : "OFFLINE - WAITING",
                        &position);
         return;
     }
 
-    _state = RouteState::Navigating;
+    {
+        RouteLock lock(_mutex);
+        _state = RouteState::Navigating;
+    }
     emitNavigation(NavigationState::Update,
                    internetConnected ? "NAVIGATION" : "NAVIGATION OFFLINE",
                    &position);
@@ -551,9 +723,6 @@ void RouteManager::emitNavigation(NavigationState navigationState,
                                   const GpsSnapshot* position) {
     NavigationData data;
     data.state = navigationState;
-    data.vehicle = _destination.vehicle;
-    data.sequence = ++_sequence;
-    data.statusMessage = status;
     data.wifiConnected = WiFi.status() == WL_CONNECTED;
     if (position != nullptr) {
         data.gpsValid = position->valid;
@@ -563,16 +732,27 @@ void RouteManager::emitNavigation(NavigationState navigationState,
         data.longitude = position->longitude;
         data.courseDeg = position->courseDeg;
     }
+    data.statusMessage = status;
 
-    if (_hasRoute && !_routeSteps.empty()) {
+    bool hasRouteVal = false;
+    String fallbackLabel;
+    {
+        RouteLock lock(_mutex);
+        data.vehicle = _destination.vehicle;
+        data.sequence = ++_sequence;
+        hasRouteVal = _hasRoute;
+        fallbackLabel = _destination.label;
+    }
+
+    if (hasRouteVal && !_routeSteps.empty()) {
         const RouteStep& step = _routeSteps[_currentStepIndex];
         data.maneuver = step.maneuver;
         data.roadName = String(step.roadName);
         if (position != nullptr && position->valid) {
-            data.distanceToTurnM = static_cast<uint32_t>(distanceMeters(position->latitude,
-                                                                       position->longitude,
-                                                                       step.latitude,
-                                                                       step.longitude) + 0.5F);
+            data.distanceToTurnM = static_cast<uint32_t>(NavMath::distanceMeters(position->latitude,
+                                                                                 position->longitude,
+                                                                                 step.latitude,
+                                                                                 step.longitude) + 0.5F);
         }
         float remainingDistance = data.distanceToTurnM;
         float remainingDuration = 0.0F;
@@ -583,21 +763,64 @@ void RouteManager::emitNavigation(NavigationState navigationState,
         data.remainingDistanceM = static_cast<uint32_t>(remainingDistance + 0.5F);
         data.etaSeconds = static_cast<uint32_t>(remainingDuration + 0.5F);
     } else {
-        data.roadName = _destination.label.length() ? _destination.label : "Waiting for route";
+        data.roadName = fallbackLabel.length() ? fallbackLabel : "Waiting for route";
     }
 
-    _currentNavigation = data;
-    _lastUpdateMs = millis();
+    {
+        RouteLock lock(_mutex);
+        _currentNavigation = data;
+        _lastUpdateMs = millis();
+    }
     if (_callback != nullptr) _callback(data);
 }
 
-RouteState RouteManager::state() const { return _state; }
-const DestinationData& RouteManager::destination() const { return _destination; }
-const String& RouteManager::lastError() const { return _lastError; }
-bool RouteManager::hasRoute() const { return _hasRoute; }
-uint32_t RouteManager::sequence() const { return _sequence; }
-uint32_t RouteManager::lastUpdateMillis() const { return _lastUpdateMs; }
-const NavigationData& RouteManager::currentNavigation() const { return _currentNavigation; }
+RouteState RouteManager::state() const {
+    RouteLock lock(_mutex);
+    return lock.locked() ? _state : RouteState::Idle;
+}
+
+DestinationData RouteManager::destination() const {
+    RouteLock lock(_mutex);
+    return lock.locked() ? _destination : DestinationData{};
+}
+
+String RouteManager::lastError() const {
+    RouteLock lock(_mutex);
+    return lock.locked() ? _lastError : String();
+}
+
+bool RouteManager::hasRoute() const {
+    RouteLock lock(_mutex);
+    return lock.locked() ? _hasRoute : false;
+}
+
+uint32_t RouteManager::sequence() const {
+    RouteLock lock(_mutex);
+    return lock.locked() ? _sequence : 0;
+}
+
+uint32_t RouteManager::lastUpdateMillis() const {
+    RouteLock lock(_mutex);
+    return lock.locked() ? _lastUpdateMs : 0;
+}
+
+NavigationData RouteManager::currentNavigation() const {
+    RouteLock lock(_mutex);
+    return lock.locked() ? _currentNavigation : NavigationData{};
+}
+
+void RouteManager::getStatusSnapshot(StatusSnapshot& outSnapshot) const {
+    RouteLock lock(_mutex);
+    if (!lock.locked()) return;
+    outSnapshot.state = _state;
+    outSnapshot.destination = _destination;
+    outSnapshot.navigation = _currentNavigation;
+    outSnapshot.lastError = _lastError;
+    outSnapshot.sequence = _sequence;
+    outSnapshot.lastUpdateMs = _lastUpdateMs;
+    outSnapshot.hasRoute = _hasRoute;
+}
+
 const std::vector<RouteManager::RoutePoint>& RouteManager::routePoints() const { return _routePoints; }
 uint16_t RouteManager::nearestRouteIndex() const { return _nearestRouteIndex; }
 uint32_t RouteManager::routeRevision() const { return _routeRevision; }
