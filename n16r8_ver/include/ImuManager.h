@@ -38,6 +38,10 @@ public:
     bool isSensorConnected() const;
     void clearFallAlert();
 
+    uint8_t detectedAddress() const;
+    uint8_t whoAmI() const;
+    uint32_t i2cErrorCount() const;
+
 private:
     AlertManager* _alertManager = nullptr;
     GpsManager* _gps = nullptr;
@@ -47,14 +51,21 @@ private:
 
     ImuData _latestData{};
     uint8_t _whoAmI = 0;
+    uint8_t _i2cAddr = 0x68;
+    bool _useRepeatedStart = true;
+    uint8_t _consecutiveErrors = 0;
     std::atomic<bool> _sensorReady{false};
     std::atomic<bool> _fallAlertActive{false};
+    std::atomic<uint8_t> _detectedAddr{0};
+    std::atomic<uint8_t> _detectedWhoAmI{0};
+    std::atomic<uint32_t> _i2cErrorCount{0};
 
     // Fall detection parameters and thresholds
     static constexpr float kFallAngleDeg = 45.0f;
     static constexpr float kClearAngleDeg = 40.0f;
     static constexpr uint32_t kFallHoldMs = 5000;
     static constexpr uint32_t kClearHoldMs = 2000;
+    static constexpr uint8_t kMaxConsecutiveErrors = 5;
 
     NavMath::ComplementaryAngleFilter _angleFilter{0.98F};
     NavMath::FallDetectorFsm _fallFsm{kFallAngleDeg, kClearAngleDeg, kFallHoldMs, kClearHoldMs};
@@ -64,8 +75,11 @@ private:
     static void taskTrampoline(void* param);
     void runTask();
     bool initHardware();
+    bool recoverI2cBus();
+    bool probeAddress(uint8_t addr, uint8_t& outWhoAmI, bool& outRepeatedStart);
     void evaluateFall(ImuData& current, uint32_t now);
 
-    void writeReg(uint8_t reg, uint8_t value);
-    uint8_t readReg(uint8_t reg);
+    bool writeReg(uint8_t reg, uint8_t value);
+    bool readReg(uint8_t addr, uint8_t reg, uint8_t& outValue, bool repeatedStart);
+    bool readBurst(uint8_t reg, uint8_t* buffer, size_t length);
 };

@@ -5,6 +5,7 @@
 #include <WiFi.h>
 #include <cfloat>
 #include <cstring>
+#include <esp_system.h>
 
 #include "GpsManager.h"
 #include "SettingsStore.h"
@@ -76,6 +77,14 @@ void copyUtf8RoadName(char* destination, size_t capacity, const char* source) {
     memcpy(destination, source, length);
     destination[length] = '\0';
 }
+
+bool isCrashRecoveryReset(esp_reset_reason_t reason) {
+    return reason == ESP_RST_TASK_WDT ||
+           reason == ESP_RST_INT_WDT ||
+           reason == ESP_RST_WDT ||
+           reason == ESP_RST_PANIC ||
+           reason == ESP_RST_BROWNOUT;
+}
 } // namespace
 
 RouteManager::RouteManager(GpsManager* gps, SettingsStore* settings)
@@ -118,14 +127,35 @@ void RouteManager::begin(NavigationUpdateCallback callback) {
             kRouteTaskCore);
     }
 
+    const esp_reset_reason_t resetReason = esp_reset_reason();
+    const bool allowAutoResume = isCrashRecoveryReset(resetReason);
+    bool shouldClearNvsActive = false;
+
     {
         RouteLock lock(_mutex);
         _destination = _settings != nullptr ? _settings->loadDestination() : DestinationData{};
-        _state = _destination.valid && _destination.active ? RouteState::WaitingGps : RouteState::Idle;
+        if (_destination.valid && _destination.active) {
+            if (allowAutoResume) {
+                _state = RouteState::WaitingGps;
+                Serial.printf("[ROUTE] Crash/WDT recovery reset (reason=%d): resuming active destination.\n",
+                              static_cast<int>(resetReason));
+            } else {
+                _destination.active = false;
+                _state = RouteState::Idle;
+                shouldClearNvsActive = true;
+                Serial.printf("[ROUTE] Clean boot (reason=%d): cleared stale active destination, staying Idle.\n",
+                              static_cast<int>(resetReason));
+            }
+        } else {
+            _state = RouteState::Idle;
+        }
+    }
+    if (shouldClearNvsActive && _settings != nullptr) {
+        _settings->setDestinationActive(false);
     }
     if (_state == RouteState::WaitingGps) {
         const GpsSnapshot position = _gps != nullptr ? _gps->snapshot() : GpsSnapshot{};
-        emitNavigation(NavigationState::Start, "WAITING FOR GPS", &position);
+        emitNavigation(NavigationState::Start, "RESUMING ROUTE", &position);
     }
 }
 

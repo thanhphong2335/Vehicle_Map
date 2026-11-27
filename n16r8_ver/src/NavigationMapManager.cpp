@@ -373,7 +373,9 @@ void NavigationMapManager::onNavigation(const NavigationData& data) {
     }
 
     if (!_started || (data.gpsValid && !_route->hasRoute())) {
-        showFallback();
+        if (_display != nullptr && !_display->isShowingQr() && _display->mode() != DeviceMode::Idle) {
+            showFallback();
+        }
     }
 }
 
@@ -572,9 +574,12 @@ bool NavigationMapManager::renderMap() {
     drawNavigationOverlay();
 
     // 7. Push entire composed frame from PSRAM to display via DMA in 1 burst (Zero flicker!)
-    _frameSprite.pushSprite(&_display->device(), 0, 0);
+    if (drawnTiles > 0) {
+        _frameSprite.pushSprite(&_display->device(), 0, 0);
+        return true;
+    }
 
-    return drawnTiles > 0;
+    return false;
 }
 
 void NavigationMapManager::drawRoute(double viewportWorldX, double viewportWorldY) {
@@ -652,7 +657,7 @@ void NavigationMapManager::drawNavigationOverlay() {
 
     _frameSprite.fillRect(0, 0, DisplayConfig::kWidth, bannerHeight, bannerColor);
     _frameSprite.drawFastHLine(0, bannerHeight - 1, DisplayConfig::kWidth, TFT_CYAN);
-    drawManeuverIcon(_navigation.maneuver, 7, needsSecondLine ? 6 : -3);
+    drawManeuverIcon(_frameSprite, _navigation.maneuver, 7, needsSecondLine ? 6 : -3);
 
     _frameSprite.setTextSize(2);
     _frameSprite.setTextColor(TFT_WHITE, bannerColor);
@@ -689,41 +694,41 @@ void NavigationMapManager::drawNavigationOverlay() {
                         static_cast<int>(_navigation.speedKmh + 0.5F));
 }
 
-void NavigationMapManager::drawManeuverIcon(Maneuver maneuver, int16_t x, int16_t y) {
+void NavigationMapManager::drawManeuverIcon(lgfx::LovyanGFX& target, Maneuver maneuver, int16_t x, int16_t y) {
     constexpr uint16_t color = TFT_CYAN;
     const int16_t cx = x + 20;
     const int16_t cy = y + 26;
 
     switch (maneuver) {
         case Maneuver::Left:
-            _frameSprite.drawWideLine(cx + 8, cy + 14, cx + 8, cy - 2, 5, color);
-            _frameSprite.drawWideLine(cx + 8, cy - 2, cx - 8, cy - 2, 5, color);
-            _frameSprite.fillTriangle(cx - 15, cy - 2, cx - 6, cy - 9, cx - 6, cy + 5, color);
+            target.drawWideLine(cx + 8, cy + 14, cx + 8, cy - 2, 5, color);
+            target.drawWideLine(cx + 8, cy - 2, cx - 8, cy - 2, 5, color);
+            target.fillTriangle(cx - 15, cy - 2, cx - 6, cy - 9, cx - 6, cy + 5, color);
             break;
         case Maneuver::Right:
-            _frameSprite.drawWideLine(cx - 8, cy + 14, cx - 8, cy - 2, 5, color);
-            _frameSprite.drawWideLine(cx - 8, cy - 2, cx + 8, cy - 2, 5, color);
-            _frameSprite.fillTriangle(cx + 15, cy - 2, cx + 6, cy - 9, cx + 6, cy + 5, color);
+            target.drawWideLine(cx - 8, cy + 14, cx - 8, cy - 2, 5, color);
+            target.drawWideLine(cx - 8, cy - 2, cx + 8, cy - 2, 5, color);
+            target.fillTriangle(cx + 15, cy - 2, cx + 6, cy - 9, cx + 6, cy + 5, color);
             break;
         case Maneuver::UTurn:
-            _frameSprite.drawWideLine(cx - 8, cy + 10, cx - 8, cy - 6, 4, color);
-            _frameSprite.drawWideLine(cx - 8, cy - 6, cx + 8, cy - 6, 4, color);
-            _frameSprite.drawWideLine(cx + 8, cy - 6, cx + 8, cy + 6, 4, color);
-            _frameSprite.fillTriangle(cx + 8, cy + 12, cx + 3, cy + 4, cx + 13, cy + 4, color);
+            target.drawWideLine(cx - 8, cy + 10, cx - 8, cy - 6, 4, color);
+            target.drawWideLine(cx - 8, cy - 6, cx + 8, cy - 6, 4, color);
+            target.drawWideLine(cx + 8, cy - 6, cx + 8, cy + 6, 4, color);
+            target.fillTriangle(cx + 8, cy + 12, cx + 3, cy + 4, cx + 13, cy + 4, color);
             break;
         case Maneuver::Roundabout:
-            _frameSprite.drawCircle(cx, cy, 11, color);
-            _frameSprite.drawCircle(cx, cy, 7, color);
-            _frameSprite.fillTriangle(cx + 7, cy - 9, cx + 15, cy - 8, cx + 10, cy - 2, color);
+            target.drawCircle(cx, cy, 11, color);
+            target.drawCircle(cx, cy, 7, color);
+            target.fillTriangle(cx + 7, cy - 9, cx + 15, cy - 8, cx + 10, cy - 2, color);
             break;
         case Maneuver::Arrive:
-            _frameSprite.fillRect(cx - 3, cy - 14, 6, 28, color);
-            _frameSprite.fillTriangle(cx + 3, cy - 14, cx + 16, cy - 6, cx + 3, cy + 2, color);
+            target.fillRect(cx - 3, cy - 14, 6, 28, color);
+            target.fillTriangle(cx + 3, cy - 14, cx + 16, cy - 6, cx + 3, cy + 2, color);
             break;
         case Maneuver::Straight:
         default:
-            _frameSprite.fillRect(cx - 3, cy - 4, 6, 18, color);
-            _frameSprite.fillTriangle(cx, cy - 16, cx - 10, cy - 4, cx + 10, cy - 4, color);
+            target.fillRect(cx - 3, cy - 4, 6, 18, color);
+            target.fillTriangle(cx, cy - 16, cx - 10, cy - 4, cx + 10, cy - 4, color);
             break;
     }
 }
@@ -766,6 +771,9 @@ void NavigationMapManager::drawWrappedRoadName(const String& road,
 }
 
 void NavigationMapManager::showFallback() {
+    if (_display == nullptr || !_active || _display->isShowingQr() || _display->mode() == DeviceMode::Idle) {
+        return;
+    }
     const uint32_t seq = _navigation.sequence != 0 ? _navigation.sequence : 1;
     if (_fallbackSequence == seq) {
         return;
@@ -779,7 +787,7 @@ void NavigationMapManager::showFallback() {
     _display->device().setCursor(8, 8);
     _display->device().print("MOTOMAP S3 - NAVIGATING");
 
-    drawManeuverIcon(_navigation.maneuver, 14, 46);
+    drawManeuverIcon(_display->device(), _navigation.maneuver, 14, 46);
     _display->device().setTextSize(3);
     _display->device().setTextColor(TFT_WHITE, 0x0841);
     _display->device().setCursor(70, 48);

@@ -76,10 +76,17 @@ void confirmOtaBootValid() {
 }
 
 void processPendingUiActions() {
-    const bool navActive = isNavigationActiveState(routeManager.state());
+    const RouteState routeState = routeManager.state();
+    const bool navActive = isNavigationActiveState(routeState);
+    const bool activelyGuiding = (routeState == RouteState::Navigating ||
+                                  routeState == RouteState::OffRoute);
     UiAction action{};
     while (UiActionQueue::poll(action)) {
-        if (navActive && action.type != UiActionType::ShowStatus) {
+        if (action.type == UiActionType::ShowIdle) {
+            if (activelyGuiding) {
+                continue;
+            }
+        } else if (navActive && action.type != UiActionType::ShowStatus) {
             continue;
         }
         switch (action.type) {
@@ -127,10 +134,23 @@ void processPendingUiActions() {
 
 void onNavigationUpdate(const NavigationData& data) {
 #if defined(MOTOMAP_NAV_MAP)
+    if (data.state == NavigationState::Stop || data.state == NavigationState::Arrived) {
+        navigationMapManager.onNavigation(data);
+        const String detail = (data.state == NavigationState::Arrived)
+            ? String("Arrived")
+            : (connectionManager.internetConnected()
+                ? connectionManager.webAddress()
+                : String("Waiting for iPhone"));
+        modeController.onIdle(detail);
+        return;
+    }
+    const RouteState rs = routeManager.state();
+    const bool shouldFocusDisplay = (data.state == NavigationState::Start) ||
+                                    data.gpsValid ||
+                                    (rs == RouteState::Navigating) ||
+                                    (rs == RouteState::OffRoute);
+    modeController.onNavigation(data, false, shouldFocusDisplay);
     navigationMapManager.onNavigation(data);
-    const bool renderImmediately = data.state == NavigationState::Stop ||
-                                   data.state == NavigationState::Arrived;
-    modeController.onNavigation(data, renderImmediately);
 #else
     modeController.onNavigation(data);
 #endif

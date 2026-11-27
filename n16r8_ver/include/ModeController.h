@@ -12,7 +12,7 @@ public:
     explicit ModeController(DisplayManager* display);
 
     void begin();
-    void onNavigation(const NavigationData& data, bool render = true);
+    void onNavigation(const NavigationData& data, bool render = true, bool takeDisplayFocus = true);
     void onMedia(bool showPlaceholder = true);
     void onIdle(const String& detail = "Waiting for iPhone");
     DeviceMode mode() const;

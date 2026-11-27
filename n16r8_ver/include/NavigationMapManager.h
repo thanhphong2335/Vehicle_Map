@@ -126,7 +126,7 @@ private:
     void drawRoute(double viewportWorldX, double viewportWorldY);
     void drawVehicleMarkerHeadingUp(int16_t x, int16_t y);
     void drawNavigationOverlay();
-    void drawManeuverIcon(Maneuver maneuver, int16_t x, int16_t y);
+    void drawManeuverIcon(lgfx::LovyanGFX& target, Maneuver maneuver, int16_t x, int16_t y);
     void drawWrappedRoadName(const String& road, int16_t x, int16_t y, int16_t width);
     void showFallback();
     void showGpsLostOverlay();

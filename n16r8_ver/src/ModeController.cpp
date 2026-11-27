@@ -11,7 +11,7 @@ void ModeController::begin() {
     }
 }
 
-void ModeController::onNavigation(const NavigationData& data, bool render) {
+void ModeController::onNavigation(const NavigationData& data, bool render, bool takeDisplayFocus) {
     if (data.state == NavigationState::Stop || data.state == NavigationState::Arrived) {
         _mode.store(DeviceMode::Idle, std::memory_order_release);
         if (_display != nullptr) {
@@ -24,7 +24,7 @@ void ModeController::onNavigation(const NavigationData& data, bool render) {
     if (_display != nullptr) {
         if (render) {
             _display->showNavigation(data);
-        } else {
+        } else if (takeDisplayFocus) {
             _display->enterNavigationMode();
         }
     }

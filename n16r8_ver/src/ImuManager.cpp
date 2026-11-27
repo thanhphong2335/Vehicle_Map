@@ -9,7 +9,8 @@
 #include "PinConfig.h"
 
 namespace {
-constexpr uint8_t MPU_ADDR = 0x68;
+constexpr uint8_t kMpuAddresses[] = {0x68, 0x69};
+constexpr uint8_t REG_SMPLRT_DIV = 0x19;
 constexpr uint8_t REG_CONFIG = 0x1A;
 constexpr uint8_t REG_GYRO_CONFIG = 0x1B;
 constexpr uint8_t REG_ACCEL_CONFIG = 0x1C;
@@ -22,7 +23,7 @@ constexpr float GYRO_LSB_PER_DEG = 65.5f;
 constexpr float G_TO_MS2 = 9.80665f;
 constexpr TickType_t SAMPLE_INTERVAL = pdMS_TO_TICKS(20); // 50 Hz sampling matches DLPF ~20 Hz (Nyquist safe)
 
-constexpr uint32_t kTaskStackSize = 4096;
+constexpr uint32_t kTaskStackSize = 6144;
 constexpr UBaseType_t kTaskPriority = 3;
 constexpr BaseType_t kTaskCore = 0; // Pinned to Core 0 to prevent UI lag on Core 1
 } // namespace
@@ -69,50 +70,168 @@ bool ImuManager::begin() {
     return true;
 }
 
-void ImuManager::writeReg(uint8_t reg, uint8_t value) {
-    Wire.beginTransmission(MPU_ADDR);
-    Wire.write(reg);
-    Wire.write(value);
-    Wire.endTransmission();
+bool ImuManager::recoverI2cBus() {
+    Wire.end();
+
+    // Bit-bang up to 9 SCL pulses if an I2C slave is holding SDA LOW after a reset/glitch.
+    pinMode(PinConfig::kI2cSdaPin, INPUT_PULLUP);
+    pinMode(PinConfig::kI2cSclPin, INPUT_PULLUP);
+    delayMicroseconds(10);
+
+    if (digitalRead(PinConfig::kI2cSdaPin) == LOW) {
+        pinMode(PinConfig::kI2cSclPin, OUTPUT);
+        for (int i = 0; i < 9 && digitalRead(PinConfig::kI2cSdaPin) == LOW; ++i) {
+            digitalWrite(PinConfig::kI2cSclPin, LOW);
+            delayMicroseconds(10);
+            digitalWrite(PinConfig::kI2cSclPin, HIGH);
+            delayMicroseconds(10);
+        }
+        // Generate STOP condition: SDA LOW -> SCL HIGH -> SDA HIGH
+        pinMode(PinConfig::kI2cSdaPin, OUTPUT);
+        digitalWrite(PinConfig::kI2cSdaPin, LOW);
+        delayMicroseconds(10);
+        digitalWrite(PinConfig::kI2cSclPin, HIGH);
+        delayMicroseconds(10);
+        digitalWrite(PinConfig::kI2cSdaPin, HIGH);
+        delayMicroseconds(10);
+        pinMode(PinConfig::kI2cSdaPin, INPUT_PULLUP);
+        pinMode(PinConfig::kI2cSclPin, INPUT_PULLUP);
+    }
+
+    const bool ok = Wire.begin(PinConfig::kI2cSdaPin, PinConfig::kI2cSclPin, 100000);
+    Wire.setTimeOut(50);
+    return ok;
 }
 
-uint8_t ImuManager::readReg(uint8_t reg) {
-    Wire.beginTransmission(MPU_ADDR);
+bool ImuManager::writeReg(uint8_t reg, uint8_t value) {
+    Wire.beginTransmission(_i2cAddr);
     Wire.write(reg);
-    Wire.endTransmission(false);
-    Wire.requestFrom(static_cast<uint8_t>(MPU_ADDR), static_cast<uint8_t>(1));
-    return Wire.available() ? Wire.read() : 0xFF;
+    Wire.write(value);
+    return Wire.endTransmission(true) == 0;
+}
+
+bool ImuManager::readReg(uint8_t addr, uint8_t reg, uint8_t& outValue, bool repeatedStart) {
+    Wire.beginTransmission(addr);
+    Wire.write(reg);
+    const uint8_t err = Wire.endTransmission(!repeatedStart);
+    if (err != 0) {
+        return false;
+    }
+    if (Wire.requestFrom(static_cast<uint16_t>(addr), static_cast<uint8_t>(1), true) != 1 ||
+        !Wire.available()) {
+        return false;
+    }
+    outValue = static_cast<uint8_t>(Wire.read());
+    return true;
+}
+
+bool ImuManager::probeAddress(uint8_t addr, uint8_t& outWhoAmI, bool& outRepeatedStart) {
+    uint8_t who = 0xFF;
+    if (readReg(addr, REG_WHO_AM_I, who, true) && who != 0xFF && who != 0x00) {
+        outWhoAmI = who;
+        outRepeatedStart = true;
+        return true;
+    }
+    if (readReg(addr, REG_WHO_AM_I, who, false) && who != 0xFF && who != 0x00) {
+        outWhoAmI = who;
+        outRepeatedStart = false;
+        return true;
+    }
+    return false;
+}
+
+bool ImuManager::readBurst(uint8_t reg, uint8_t* buffer, size_t length) {
+    auto tryRead = [&](bool repeatedStart) -> bool {
+        Wire.beginTransmission(_i2cAddr);
+        Wire.write(reg);
+        if (Wire.endTransmission(!repeatedStart) != 0) {
+            return false;
+        }
+        if (Wire.requestFrom(static_cast<uint16_t>(_i2cAddr), static_cast<uint8_t>(length), true) != length) {
+            return false;
+        }
+        for (size_t i = 0; i < length; ++i) {
+            if (!Wire.available()) {
+                return false;
+            }
+            buffer[i] = static_cast<uint8_t>(Wire.read());
+        }
+        return true;
+    };
+
+    if (tryRead(_useRepeatedStart)) {
+        return true;
+    }
+    if (tryRead(!_useRepeatedStart)) {
+        _useRepeatedStart = !_useRepeatedStart;
+        return true;
+    }
+    return false;
 }
 
 bool ImuManager::initHardware() {
-    Wire.begin(PinConfig::kI2cSdaPin, PinConfig::kI2cSclPin);
-    Wire.setClock(100000);
-
-    _whoAmI = readReg(REG_WHO_AM_I);
-    Serial.printf("[IMU] I2C SDA: %d, SCL: %d, WHO_AM_I: 0x%02X\n",
-                  PinConfig::kI2cSdaPin, PinConfig::kI2cSclPin, _whoAmI);
-
-    if (_whoAmI == 0xFF || _whoAmI == 0x00) {
-        Serial.println("[IMU] WARNING: Sensor not detected or invalid address.");
+    if (!recoverI2cBus()) {
+        Serial.printf("[IMU] ERROR: Wire.begin failed on SDA=%d SCL=%d\n",
+                      PinConfig::kI2cSdaPin, PinConfig::kI2cSclPin);
         _sensorReady.store(false, std::memory_order_release);
         return false;
     }
 
+    uint8_t foundAddr = 0;
+    uint8_t foundWho = 0;
+    bool repeatedStart = true;
+    for (uint8_t addr : kMpuAddresses) {
+        if (probeAddress(addr, foundWho, repeatedStart)) {
+            foundAddr = addr;
+            break;
+        }
+    }
+
+    if (foundAddr == 0) {
+        Serial.printf("[IMU] WARNING: Sensor not detected on I2C (SDA=%d, SCL=%d, tried 0x68/0x69).\n",
+                      PinConfig::kI2cSdaPin, PinConfig::kI2cSclPin);
+        _whoAmI = 0;
+        _detectedAddr.store(0, std::memory_order_release);
+        _detectedWhoAmI.store(0, std::memory_order_release);
+        _sensorReady.store(false, std::memory_order_release);
+        return false;
+    }
+
+    _i2cAddr = foundAddr;
+    _whoAmI = foundWho;
+    _useRepeatedStart = repeatedStart;
+    _detectedAddr.store(_i2cAddr, std::memory_order_release);
+    _detectedWhoAmI.store(_whoAmI, std::memory_order_release);
+
     // Wake up MPU (use internal 8MHz clock)
-    writeReg(REG_PWR_MGMT_1, 0x00);
+    if (!writeReg(REG_PWR_MGMT_1, 0x00)) {
+        Serial.printf("[IMU] ERROR: Failed to wake sensor at 0x%02X.\n", _i2cAddr);
+        _sensorReady.store(false, std::memory_order_release);
+        return false;
+    }
     vTaskDelay(pdMS_TO_TICKS(100));
 
-    // Configure Accel to +-8g
-    writeReg(REG_ACCEL_CONFIG, 0x10);
-    // Configure Gyro to +-500 deg/s
-    writeReg(REG_GYRO_CONFIG, 0x08);
+    // Sample rate = 1kHz / (1 + 19) = 50 Hz (matches 20ms SAMPLE_INTERVAL with DLPF enabled)
+    bool cfgOk = writeReg(REG_SMPLRT_DIV, 19);
     // Low pass filter DLPF ~20Hz
-    writeReg(REG_CONFIG, 0x04);
+    cfgOk = cfgOk && writeReg(REG_CONFIG, 0x04);
+    // Configure Gyro to +-500 deg/s
+    cfgOk = cfgOk && writeReg(REG_GYRO_CONFIG, 0x08);
+    // Configure Accel to +-8g
+    cfgOk = cfgOk && writeReg(REG_ACCEL_CONFIG, 0x10);
+
+    if (!cfgOk) {
+        Serial.printf("[IMU] ERROR: Failed to configure sensor registers at 0x%02X.\n", _i2cAddr);
+        _sensorReady.store(false, std::memory_order_release);
+        return false;
+    }
 
     _angleFilter.reset();
     _lastSampleUs = micros();
+    _consecutiveErrors = 0;
     _sensorReady.store(true, std::memory_order_release);
-    Serial.println("[IMU] Sensor hardware initialized successfully.");
+    Serial.printf("[IMU] Sensor initialized at 0x%02X (WHO_AM_I=0x%02X, mode=%s).\n",
+                  _i2cAddr, _whoAmI, _useRepeatedStart ? "rep-start" : "stop-start");
     return true;
 }
 
@@ -123,10 +242,11 @@ void ImuManager::taskTrampoline(void* param) {
 
 void ImuManager::runTask() {
     esp_task_wdt_add(nullptr);
+    vTaskDelay(pdMS_TO_TICKS(100)); // Allow power rail & MPU-6050 startup stabilization
     initHardware();
 
     TickType_t lastWakeTime = xTaskGetTickCount();
-    uint32_t lastRetryAttemptMs = 0;
+    uint32_t lastRetryAttemptMs = millis();
 
     for (;;) {
         esp_task_wdt_reset();
@@ -136,29 +256,36 @@ void ImuManager::runTask() {
             if (now - lastRetryAttemptMs >= 3000) {
                 lastRetryAttemptMs = now;
                 initHardware();
+                lastWakeTime = xTaskGetTickCount();
             }
             vTaskDelayUntil(&lastWakeTime, SAMPLE_INTERVAL);
             continue;
         }
 
-        Wire.beginTransmission(MPU_ADDR);
-        Wire.write(REG_ACCEL_XOUT_H);
-        const uint8_t err = Wire.endTransmission(false);
-
-        if (err != 0 || Wire.requestFrom(static_cast<uint8_t>(MPU_ADDR), static_cast<uint8_t>(14)) != 14) {
-            Serial.println("[IMU] Read error on I2C bus.");
-            _sensorReady.store(false, std::memory_order_release);
-            if (xSemaphoreTake(_mutex, pdMS_TO_TICKS(20)) == pdTRUE) {
-                _latestData.valid = false;
-                xSemaphoreGive(_mutex);
+        uint8_t rawBytes[14]{};
+        if (!readBurst(REG_ACCEL_XOUT_H, rawBytes, sizeof(rawBytes))) {
+            _i2cErrorCount.fetch_add(1, std::memory_order_relaxed);
+            if (_consecutiveErrors < 255) {
+                ++_consecutiveErrors;
             }
+            if (_consecutiveErrors >= kMaxConsecutiveErrors) {
+                Serial.println("[IMU] Read error on I2C bus (threshold reached, scheduling recovery).");
+                _sensorReady.store(false, std::memory_order_release);
+                lastRetryAttemptMs = now;
+                if (xSemaphoreTake(_mutex, pdMS_TO_TICKS(20)) == pdTRUE) {
+                    _latestData.valid = false;
+                    xSemaphoreGive(_mutex);
+                }
+            }
+            lastWakeTime = xTaskGetTickCount();
             vTaskDelayUntil(&lastWakeTime, SAMPLE_INTERVAL);
             continue;
         }
 
+        _consecutiveErrors = 0;
         int16_t raw[7];
         for (int i = 0; i < 7; ++i) {
-            raw[i] = static_cast<int16_t>((Wire.read() << 8) | Wire.read());
+            raw[i] = static_cast<int16_t>((static_cast<uint16_t>(rawBytes[i * 2]) << 8) | rawBytes[i * 2 + 1]);
         }
 
         ImuData data{};
@@ -166,7 +293,7 @@ void ImuManager::runTask() {
         data.ay = (static_cast<float>(raw[1]) / ACCEL_LSB_PER_G) * G_TO_MS2;
         data.az = (static_cast<float>(raw[2]) / ACCEL_LSB_PER_G) * G_TO_MS2;
 
-        data.temperature = (_whoAmI == 0x68)
+        data.temperature = (_whoAmI == 0x68 || _whoAmI == 0x69 || _whoAmI == 0x72)
             ? (static_cast<float>(raw[3]) / 340.0f + 36.53f)
             : (static_cast<float>(raw[3]) / 333.87f + 21.0f);
 
@@ -253,6 +380,18 @@ bool ImuManager::isFallDetected() const {
 
 bool ImuManager::isSensorConnected() const {
     return _sensorReady.load(std::memory_order_acquire);
+}
+
+uint8_t ImuManager::detectedAddress() const {
+    return _detectedAddr.load(std::memory_order_acquire);
+}
+
+uint8_t ImuManager::whoAmI() const {
+    return _detectedWhoAmI.load(std::memory_order_acquire);
+}
+
+uint32_t ImuManager::i2cErrorCount() const {
+    return _i2cErrorCount.load(std::memory_order_acquire);
 }
 
 void ImuManager::clearFallAlert() {

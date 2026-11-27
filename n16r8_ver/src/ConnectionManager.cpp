@@ -1202,6 +1202,9 @@ void ConnectionManager::handleImuApi() {
     JsonDocument doc;
     doc["valid"] = data.valid;
     doc["connected"] = _imu->isSensorConnected();
+    doc["i2c_addr"] = _imu->detectedAddress();
+    doc["who_am_i"] = _imu->whoAmI();
+    doc["i2c_errors"] = _imu->i2cErrorCount();
     doc["ax"] = data.ax;
     doc["ay"] = data.ay;
     doc["az"] = data.az;
