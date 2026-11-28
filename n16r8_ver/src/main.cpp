@@ -91,15 +91,8 @@ void processPendingUiActions() {
         }
         switch (action.type) {
             case UiActionType::ShowIdle:
-            case UiActionType::ClearTestImageAndIdle:
-            case UiActionType::DeleteAnimationAndIdle:
                 s_mediaDismissedByUser = true;
                 modeController.onIdle(action.detail[0] ? String(action.detail) : String("Waiting for iPhone"));
-                break;
-
-            case UiActionType::ShowMediaPlaceholder:
-                s_mediaDismissedByUser = false;
-                modeController.onMedia(true);
                 break;
 
             case UiActionType::EnterMediaMode:
@@ -112,9 +105,6 @@ void processPendingUiActions() {
                     s_mediaDismissedByUser = false;
                     modeController.onMedia(false);
                 }
-                break;
-
-            case UiActionType::ReloadAndCacheAnimation:
                 break;
 
             case UiActionType::ShowStatus:

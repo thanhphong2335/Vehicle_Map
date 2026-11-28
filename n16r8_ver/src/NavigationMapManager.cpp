@@ -207,14 +207,20 @@ bool NavigationMapManager::loadTileFromFlash(const TileKey& tile, lgfx::LGFX_Spr
     return false;
 }
 
-bool NavigationMapManager::isTileInCache(const TileKey& tile) const {
-    // 1. In PSRAM
+bool NavigationMapManager::isTileInPsram(const TileKey& tile) const {
     for (size_t i = 0; i < kPsramTileCacheSize; ++i) {
         if (_psramTileCache[i].valid && sameTile(_psramTileCache[i].key, tile)) {
             return true;
         }
     }
-    // 2. In Flash LittleFS
+    return false;
+}
+
+bool NavigationMapManager::isTileInCache(const TileKey& tile) const {
+    if (isTileInPsram(tile)) {
+        return true;
+    }
+    // Check offline LittleFS Flash cache
     FsLock fsLock(pdMS_TO_TICKS(50));
     if (!fsLock.locked()) return false;
     return LittleFS.exists(tilePath(tile));
@@ -243,6 +249,10 @@ bool NavigationMapManager::saveOfflineTile(const TileKey& tile, const uint8_t* d
         _dirty = true;
     }
     return ok;
+}
+
+void NavigationMapManager::requestCacheInvalidation() {
+    _clearCacheRequested.store(true, std::memory_order_release);
 }
 
 bool NavigationMapManager::deleteOfflineTiles() {
@@ -381,6 +391,15 @@ void NavigationMapManager::onNavigation(const NavigationData& data) {
 
 void NavigationMapManager::loop(bool internetConnected) {
     if (!_started) return;
+    if (_clearCacheRequested.exchange(false, std::memory_order_acq_rel)) {
+        for (size_t i = 0; i < kPsramTileCacheSize; ++i) {
+            _psramTileCache[i].valid = false;
+        }
+        _failedTileValid = false;
+        _showingMap = false;
+        _lookAheadCursor = 0;
+        _dirty = true;
+    }
     _internetConnected = internetConnected;
     processDownloadResult();
     if (!_active || OtaGuard::isActive()) return;
@@ -847,18 +866,27 @@ void NavigationMapManager::queueMissingTile(const TileKey* tiles,
         }
     }
 
-    // 3. Proactive priority: Pre-fetch upcoming tiles along the active route into PSRAM!
+    // 3. Proactive priority: Pre-fetch upcoming tiles along the active route without stalling Core 1 on Flash checks.
     if (_route != nullptr && _route->hasRoute()) {
         const std::vector<RouteManager::RoutePoint>& points = _route->routePoints();
         const size_t nearestIdx = _route->nearestRouteIndex();
         const size_t totalPoints = points.size();
-        const size_t lookAheadCount = 1000;
-        const size_t maxIdx = (nearestIdx + lookAheadCount < totalPoints)
-            ? (nearestIdx + lookAheadCount)
+        constexpr size_t kLookAheadCount = 1000;
+        constexpr uint8_t kMaxFlashChecksPerTick = 4;
+        const size_t maxIdx = (nearestIdx + kLookAheadCount < totalPoints)
+            ? (nearestIdx + kLookAheadCount)
             : totalPoints;
+        if (nearestIdx >= maxIdx) return;
+
+        if (_lookAheadCursor < nearestIdx || _lookAheadCursor >= maxIdx) {
+            _lookAheadCursor = nearestIdx;
+        }
 
         TileKey lastCheckedTile{-1, -1, 0};
-        for (size_t idx = nearestIdx; idx < maxIdx; ++idx) {
+        uint8_t flashChecks = 0;
+        const size_t span = maxIdx - nearestIdx;
+        for (size_t step = 0; step < span; ++step) {
+            const size_t idx = nearestIdx + ((_lookAheadCursor - nearestIdx + step) % span);
             double worldX = 0.0;
             double worldY = 0.0;
             project(points[idx].latitude, points[idx].longitude, kMapZoom, worldX, worldY);
@@ -876,15 +904,30 @@ void NavigationMapManager::queueMissingTile(const TileKey* tiles,
             }
             lastCheckedTile = aheadTile;
 
+            if (isTileInPsram(aheadTile)) {
+                continue;
+            }
             if (!isTileInCache(aheadTile)) {
                 if (_failedTileValid && sameTile(_failedTile, aheadTile) &&
                     millis() < _failedRetryAtMs) {
+                    ++flashChecks;
+                    if (flashChecks >= kMaxFlashChecksPerTick) {
+                        _lookAheadCursor = idx + 1;
+                        return;
+                    }
                     continue;
                 }
+                _lookAheadCursor = idx + 1;
                 enqueueTile(aheadTile);
                 return;
             }
+            ++flashChecks;
+            if (flashChecks >= kMaxFlashChecksPerTick) {
+                _lookAheadCursor = idx + 1;
+                return;
+            }
         }
+        _lookAheadCursor = nearestIdx;
     }
 }
 

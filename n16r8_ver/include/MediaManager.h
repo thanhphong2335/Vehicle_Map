@@ -32,8 +32,6 @@ public:
 
     // Core 1 rendering methods (SPI2 exclusive)
     bool drawPendingStreamFrame();
-    bool handleJpeg(const uint8_t* data, size_t length);
-    bool showTestImage(const uint8_t* data, size_t length);
     bool showSavedImage();
 
     bool hasTestImage() const;
@@ -84,7 +82,6 @@ private:
     uint16_t _playbackIndex = 0;
     uint32_t _playbackStartMs = 0;
     uint16_t _lastRenderedFrame = 0xFFFF;
-    uint32_t _nextFrameAtMs = 0;
     bool _wasNavigationActive = false;
 
     CachedFrame _cachedFrames[kMaximumFrames]{};

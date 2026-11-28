@@ -36,6 +36,39 @@ constexpr uint32_t kReconnectDelaysMs[] = {5000, 15000, 30000};
 constexpr uint32_t kWebTaskStack = 8192;
 constexpr UBaseType_t kWebTaskPriority = 2;
 constexpr BaseType_t kWebTaskCore = 0;
+constexpr size_t kMaxUploadBufferBytes = 128U * 1024U;
+
+uint8_t* allocateStagingBuffer(size_t bytes) {
+    uint8_t* ptr = static_cast<uint8_t*>(ps_malloc(bytes));
+    if (ptr == nullptr) {
+        ptr = static_cast<uint8_t*>(malloc(bytes));
+    }
+    return ptr;
+}
+
+bool hasValidPngSignature(const uint8_t* data, size_t len) {
+    static constexpr uint8_t kPngMagic[8] = {0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A};
+    return data != nullptr && len >= 64 && memcmp(data, kPngMagic, sizeof(kPngMagic)) == 0;
+}
+
+bool appendUploadChunk(uint8_t* dst,
+                       size_t& dstLen,
+                       size_t maxLen,
+                       const uint8_t* src,
+                       size_t chunkLen,
+                       String& err,
+                       const char* tooLargeError) {
+    if (dst == nullptr) return false;
+    if (dstLen + chunkLen > maxLen) {
+        err = tooLargeError;
+        return false;
+    }
+    if (chunkLen > 0 && src != nullptr) {
+        memcpy(dst + dstLen, src, chunkLen);
+        dstLen += chunkLen;
+    }
+    return true;
+}
 
 bool parseBody(WebServer& server, JsonDocument& document, String& error) {
     if (!server.hasArg("plain") || server.arg("plain").length() == 0) {
@@ -72,13 +105,10 @@ ConnectionManager::ConnectionManager(DisplayManager* display,
 
 ConnectionManager::~ConnectionManager() {
     freeTestImageUploadBuffer();
+    freeTileUploadBuffer();
     if (_webTaskHandle != nullptr) {
         vTaskDelete(_webTaskHandle);
         _webTaskHandle = nullptr;
-    }
-    if (_netMutex != nullptr) {
-        vSemaphoreDelete(_netMutex);
-        _netMutex = nullptr;
     }
 }
 
@@ -88,6 +118,14 @@ void ConnectionManager::freeTestImageUploadBuffer() {
         _testImageUploadBuf = nullptr;
     }
     _testImageUploadLen = 0;
+}
+
+void ConnectionManager::freeTileUploadBuffer() {
+    if (_tileUploadBuf != nullptr) {
+        free(_tileUploadBuf);
+        _tileUploadBuf = nullptr;
+    }
+    _tileUploadLen = 0;
 }
 
 void ConnectionManager::remountFsIfNeeded() {
@@ -100,9 +138,6 @@ void ConnectionManager::remountFsIfNeeded() {
 }
 
 void ConnectionManager::begin() {
-    if (_netMutex == nullptr) {
-        _netMutex = xSemaphoreCreateRecursiveMutex();
-    }
     {
         FsLock fsLock;
         if (!fsLock.locked() || !LittleFS.begin(true)) {
@@ -806,25 +841,18 @@ void ConnectionManager::handleTestImage() {
         return;
     }
 
-    UiAction action{};
-    action.type = UiActionType::EnterMediaMode;
-    action.flag = false;
-    UiActionQueue::push(action);
+    // Core 1 UI display is already triggered by saveTestImageOnly() -> ShowSavedImage.
     sendJson("{\"ok\":true,\"display\":\"test_image\"}");
 }
 
 void ConnectionManager::handleTestImageUpload() {
-    constexpr size_t kMaxUploadBytes = 128U * 1024U;
     HTTPUpload& upload = _server.upload();
     if (upload.status == UPLOAD_FILE_START) {
         freeTestImageUploadBuffer();
         _testImageUploadOk = !navigationActive();
         _testImageUploadError = _testImageUploadOk ? "" : "navigation_has_priority";
         if (_testImageUploadOk) {
-            _testImageUploadBuf = static_cast<uint8_t*>(ps_malloc(kMaxUploadBytes));
-            if (_testImageUploadBuf == nullptr) {
-                _testImageUploadBuf = static_cast<uint8_t*>(malloc(kMaxUploadBytes));
-            }
+            _testImageUploadBuf = allocateStagingBuffer(kMaxUploadBufferBytes);
             if (_testImageUploadBuf == nullptr) {
                 _testImageUploadOk = false;
                 _testImageUploadError = "image_oom";
@@ -834,14 +862,14 @@ void ConnectionManager::handleTestImageUpload() {
     }
     if (upload.status == UPLOAD_FILE_WRITE) {
         esp_task_wdt_reset();
-        if (!_testImageUploadOk || _testImageUploadBuf == nullptr) return;
-        if (_testImageUploadLen + upload.currentSize > kMaxUploadBytes) {
-            _testImageUploadOk = false;
-            _testImageUploadError = "jpeg_too_large";
-            return;
-        }
-        memcpy(_testImageUploadBuf + _testImageUploadLen, upload.buf, upload.currentSize);
-        _testImageUploadLen += upload.currentSize;
+        if (!_testImageUploadOk) return;
+        _testImageUploadOk = appendUploadChunk(_testImageUploadBuf,
+                                               _testImageUploadLen,
+                                               kMaxUploadBufferBytes,
+                                               upload.buf,
+                                               upload.currentSize,
+                                               _testImageUploadError,
+                                               "jpeg_too_large");
         return;
     }
     if (upload.status == UPLOAD_FILE_END) {
@@ -972,26 +1000,72 @@ void ConnectionManager::sendError(const String& error, int status) {
 }
 
 bool ConnectionManager::serveFile(const char* path, const char* contentType) {
-    FsLock fsLock(pdMS_TO_TICKS(2000));
-    if (!fsLock.locked()) {
-        sendError("fs_busy", 503);
-        return false;
+    uint8_t* fileBuf = nullptr;
+    size_t fileSize = 0;
+
+    {
+        FsLock fsLock(pdMS_TO_TICKS(2000));
+        if (!fsLock.locked()) {
+            sendError("fs_busy", 503);
+            return false;
+        }
+        if (!LittleFS.exists(path)) {
+            sendError("file_not_found", 404);
+            return false;
+        }
+        File file = LittleFS.open(path, "r");
+        if (!file) {
+            sendError("file_open_failed", 500);
+            return false;
+        }
+        fileSize = file.size();
+        if (fileSize > 0) {
+            fileBuf = allocateStagingBuffer(fileSize);
+            if (fileBuf != nullptr) {
+                if (file.read(fileBuf, fileSize) != fileSize) {
+                    free(fileBuf);
+                    fileBuf = nullptr;
+                    file.close();
+                    sendError("file_read_failed", 500);
+                    return false;
+                }
+                file.close();
+            } else {
+                // Memory fallback: stream directly while locked if staging buffer allocation fails.
+                _server.sendHeader("Cache-Control", "no-cache, no-store, must-revalidate");
+                _server.sendHeader("Pragma", "no-cache");
+                _server.sendHeader("Expires", "0");
+                _server.streamFile(file, contentType);
+                file.close();
+                return true;
+            }
+        } else {
+            file.close();
+        }
     }
-    if (!LittleFS.exists(path)) {
-        sendError("file_not_found", 404);
-        return false;
-    }
-    File file = LittleFS.open(path, "r");
-    if (!file) {
-        sendError("file_open_failed", 500);
-        return false;
-    }
+
+    // Stream over TCP outside FsLock so slow Wi-Fi clients do not block Core 1 LittleFS reads.
     _server.sendHeader("Cache-Control", "no-cache, no-store, must-revalidate");
     _server.sendHeader("Pragma", "no-cache");
     _server.sendHeader("Expires", "0");
-    _server.streamFile(file, contentType);
-    file.close();
-    return true;
+    _server.setContentLength(fileSize);
+    _server.send(200, contentType, "");
+
+    WiFiClient client = _server.client();
+    size_t sent = 0;
+    constexpr size_t kChunkSize = 4096;
+    while (sent < fileSize && client.connected()) {
+        esp_task_wdt_reset();
+        const size_t remaining = fileSize - sent;
+        const size_t toWrite = remaining > kChunkSize ? kChunkSize : remaining;
+        const size_t written = client.write(fileBuf + sent, toWrite);
+        if (written == 0) {
+            break;
+        }
+        sent += written;
+    }
+    free(fileBuf);
+    return sent == fileSize;
 }
 
 void ConnectionManager::loop() {
@@ -1029,6 +1103,9 @@ void ConnectionManager::handleMapOfflineStats() {
 void ConnectionManager::handleMapOfflineDelete() {
 #if defined(MOTOMAP_NAV_MAP)
     NavigationMapManager::deleteOfflineTiles();
+    if (_mapManager != nullptr) {
+        _mapManager->requestCacheInvalidation();
+    }
 #endif
     sendJson("{\"ok\":true,\"message\":\"offline_tiles_cleared\"}");
 }
@@ -1036,68 +1113,71 @@ void ConnectionManager::handleMapOfflineDelete() {
 void ConnectionManager::handleMapTileUpload() {
     HTTPUpload& upload = _server.upload();
     if (upload.status == UPLOAD_FILE_START) {
+        freeTileUploadBuffer();
         _uploadRequestOk = true;
         _uploadRequestError = "";
-        const int32_t z = _server.arg("z").toInt();
-        const int32_t x = _server.arg("x").toInt();
-        const int32_t y = _server.arg("y").toInt();
+        _tileUploadZ = _server.arg("z").toInt();
+        _tileUploadX = _server.arg("x").toInt();
+        _tileUploadY = _server.arg("y").toInt();
 
+        const int32_t maxCoord = (_tileUploadZ >= 1 && _tileUploadZ <= 19) ? (1L << _tileUploadZ) : 0;
         if (!_server.hasArg("z") || !_server.hasArg("x") || !_server.hasArg("y") ||
-            z < 1 || z > 19 || x < 0 || y < 0) {
+            _tileUploadZ < 1 || _tileUploadZ > 19 ||
+            _tileUploadX < 0 || _tileUploadX >= maxCoord ||
+            _tileUploadY < 0 || _tileUploadY >= maxCoord) {
             _uploadRequestOk = false;
             _uploadRequestError = "invalid_tile_coordinates";
             return;
         }
 
-        FsLock fsLock(pdMS_TO_TICKS(1500));
-        if (!fsLock.locked()) {
+        _tileUploadBuf = allocateStagingBuffer(kMaxUploadBufferBytes);
+        if (_tileUploadBuf == nullptr) {
             _uploadRequestOk = false;
-            _uploadRequestError = "fs_busy";
-            return;
-        }
-        if (!LittleFS.exists("/tiles")) {
-            LittleFS.mkdir("/tiles");
-        }
-
-        char path[32];
-        snprintf(path, sizeof(path), "/tiles/%ld_%ld_%ld.png",
-                 static_cast<long>(z), static_cast<long>(x), static_cast<long>(y));
-        if (_tileUploadFile) _tileUploadFile.close();
-        _tileUploadFile = LittleFS.open(path, "w");
-        if (!_tileUploadFile) {
-            _uploadRequestOk = false;
-            _uploadRequestError = "tile_open_failed";
+            _uploadRequestError = "tile_oom";
         }
         return;
     }
 
     if (upload.status == UPLOAD_FILE_WRITE) {
         esp_task_wdt_reset();
-        if (_uploadRequestOk && _tileUploadFile) {
-            FsLock fsLock(pdMS_TO_TICKS(1500));
-            if (!fsLock.locked() || _tileUploadFile.write(upload.buf, upload.currentSize) != upload.currentSize) {
-                _uploadRequestOk = false;
-                _uploadRequestError = fsLock.locked() ? "tile_write_failed" : "fs_busy";
-            }
-        }
+        if (!_uploadRequestOk) return;
+        _uploadRequestOk = appendUploadChunk(_tileUploadBuf,
+                                             _tileUploadLen,
+                                             kMaxUploadBufferBytes,
+                                             upload.buf,
+                                             upload.currentSize,
+                                             _uploadRequestError,
+                                             "tile_too_large");
         return;
     }
 
     if (upload.status == UPLOAD_FILE_END) {
-        FsLock fsLock(pdMS_TO_TICKS(1500));
-        if (_tileUploadFile) {
-            _tileUploadFile.close();
+        if (_uploadRequestOk && _tileUploadBuf != nullptr) {
+            if (!hasValidPngSignature(_tileUploadBuf, _tileUploadLen)) {
+                _uploadRequestOk = false;
+                _uploadRequestError = "invalid_png_tile";
+            } else {
+#if defined(MOTOMAP_NAV_MAP)
+                const NavigationMapManager::TileKey tile{
+                    _tileUploadX, _tileUploadY, static_cast<uint8_t>(_tileUploadZ)};
+                if (!NavigationMapManager::writeOfflineTileFile(tile, _tileUploadBuf, _tileUploadLen)) {
+                    _uploadRequestOk = false;
+                    _uploadRequestError = "tile_write_failed";
+                }
+#else
+                _uploadRequestOk = false;
+                _uploadRequestError = "nav_map_disabled";
+#endif
+            }
         }
+        freeTileUploadBuffer();
         return;
     }
 
     if (upload.status == UPLOAD_FILE_ABORTED) {
         _uploadRequestOk = false;
         _uploadRequestError = "tile_upload_aborted";
-        FsLock fsLock(pdMS_TO_TICKS(1500));
-        if (_tileUploadFile) {
-            _tileUploadFile.close();
-        }
+        freeTileUploadBuffer();
     }
 }
 

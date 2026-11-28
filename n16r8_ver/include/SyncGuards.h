@@ -55,14 +55,10 @@ bool isActive();
 
 enum class UiActionType : uint8_t {
     ShowIdle = 0,
-    ShowMediaPlaceholder,
     EnterMediaMode,
     ShowSavedImage,
-    ReloadAndCacheAnimation,
     ShowStatus,
     DrawStreamFrame,
-    ClearTestImageAndIdle,
-    DeleteAnimationAndIdle,
 };
 
 struct UiAction {

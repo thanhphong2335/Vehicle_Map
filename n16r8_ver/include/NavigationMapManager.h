@@ -9,6 +9,7 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
 #include <freertos/task.h>
+#include <atomic>
 
 #include "MotoMapTypes.h"
 
@@ -38,6 +39,8 @@ public:
     };
 
     bool saveOfflineTile(const TileKey& tile, const uint8_t* data, size_t length);
+    void requestCacheInvalidation();
+    static bool writeOfflineTileFile(const TileKey& tile, const uint8_t* data, size_t length);
     static bool deleteOfflineTiles();
     static void getOfflineTileStats(size_t& count, size_t& totalBytes);
 
@@ -103,6 +106,8 @@ private:
     QueueHandle_t _tileResultQueue = nullptr;
     bool _tileInFlight = false;
     TileKey _activeTile;
+    std::atomic<bool> _clearCacheRequested{false};
+    size_t _lookAheadCursor = 0;
 
     static bool sameTile(const TileKey& left, const TileKey& right);
     static void project(double latitude,
@@ -114,6 +119,7 @@ private:
     void initPsramSprites();
     bool getCachedTileSprite(const TileKey& tile, lgfx::LGFX_Sprite*& outSprite);
     bool loadTileFromFlash(const TileKey& tile, lgfx::LGFX_Sprite*& outSprite);
+    bool isTileInPsram(const TileKey& tile) const;
     bool isTileInCache(const TileKey& tile) const;
     static String tilePath(const TileKey& tile);
 
@@ -143,7 +149,6 @@ private:
     static void downloadTaskThunk(void* parameter);
     void downloadLoop();
     bool downloadTile(const TileKey& tile, uint8_t* buffer, size_t& receivedBytes, String& error);
-    static bool writeOfflineTileFile(const TileKey& tile, const uint8_t* data, size_t length);
 };
 
 #endif

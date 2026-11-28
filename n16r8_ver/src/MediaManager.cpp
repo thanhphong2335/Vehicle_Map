@@ -4,6 +4,7 @@
 #include <LittleFS.h>
 #include <esp_heap_caps.h>
 #include <esp_system.h>
+#include <esp_task_wdt.h>
 
 #include "DisplayConfig.h"
 #include "DisplayManager.h"
@@ -15,6 +16,13 @@ constexpr char kAnimationDirectory[] = "/animation";
 constexpr char kAnimationManifest[] = "/animation/manifest.json";
 constexpr uint16_t kAnimationWidth = DisplayConfig::kWidth;
 constexpr uint16_t kAnimationHeight = DisplayConfig::kHeight;
+constexpr size_t kPsramHeadroomBytes = 256000;
+
+void resetTaskWdtIfSubscribed() {
+    if (esp_task_wdt_status(nullptr) == ESP_OK) {
+        esp_task_wdt_reset();
+    }
+}
 
 class MediaLock {
 public:
@@ -154,7 +162,8 @@ void MediaManager::loop(bool navigationActive) {
 }
 
 bool MediaManager::queueStreamJpeg(const uint8_t* data, size_t length) {
-    if (data == nullptr || length < 128 || length > kMaximumTestImageBytes) {
+    if (data == nullptr || length < 128 || length > kMaximumTestImageBytes ||
+        data[0] != 0xFF || data[1] != 0xD8) {
         return false;
     }
     MediaLock lock(_mutex);
@@ -223,45 +232,6 @@ bool MediaManager::saveTestImageOnly(const uint8_t* data, size_t length) {
     UiAction action{};
     action.type = UiActionType::ShowSavedImage;
     return UiActionQueue::push(action);
-}
-
-bool MediaManager::handleJpeg(const uint8_t* data, size_t length) {
-    if (_display == nullptr) return false;
-    const bool ok = _display->drawJpeg(data, length);
-    if (ok) {
-        MediaLock lock(_mutex);
-        _testImageActive.store(false, std::memory_order_release);
-        _streamFrameCount.fetch_add(1, std::memory_order_relaxed);
-        _externalStreamUntilMs = millis() + 750;
-    }
-    return ok;
-}
-
-bool MediaManager::showTestImage(const uint8_t* data, size_t length) {
-    if (_display == nullptr || data == nullptr || length < 128 ||
-        length > kMaximumTestImageBytes) {
-        return false;
-    }
-
-    const bool ok = _display->drawJpeg(data, length);
-    if (ok) {
-        MediaLock lock(_mutex);
-        _streamFrameCount.fetch_add(1, std::memory_order_relaxed);
-        _externalStreamUntilMs = 0;
-        _testImageActive.store(true, std::memory_order_release);
-        FsLock fsLock;
-        if (fsLock.locked()) {
-            File file = LittleFS.open(kSavedImagePath, "w");
-            if (file) {
-                file.write(data, length);
-                file.close();
-                Serial.printf("Saved test image to %s (%u bytes)\n", kSavedImagePath, length);
-            } else {
-                Serial.println("Failed to open LittleFS file to save test image");
-            }
-        }
-    }
-    return ok;
 }
 
 void MediaManager::clearTestImage() {
@@ -363,6 +333,7 @@ bool MediaManager::removeAnimationFiles(String* /*error*/) {
     }
 
     for (uint16_t i = 0; i < count; ++i) {
+        resetTaskWdtIfSubscribed();
         LittleFS.remove(framePath(i));
     }
     if (LittleFS.exists(kAnimationManifest)) {
@@ -386,7 +357,6 @@ bool MediaManager::clearAnimation(String* error) {
     _playbackIndex = 0;
     _playbackStartMs = 0;
     _lastRenderedFrame = 0xFFFF;
-    _nextFrameAtMs = 0;
     _uploadId = "";
     memset(_uploadMask, 0, sizeof(_uploadMask));
     _uploadTotalBytes = 0;
@@ -636,6 +606,7 @@ bool MediaManager::reloadAnimation(String* error) {
             return false;
         }
         for (uint16_t index = 0; index < frames; ++index) {
+            resetTaskWdtIfSubscribed();
             if (!LittleFS.exists(framePath(index))) {
                 if (error != nullptr) *error = "animation_frame_missing";
                 return false;
@@ -650,7 +621,6 @@ bool MediaManager::reloadAnimation(String* error) {
     _playbackIndex = 0;
     _playbackStartMs = 0;
     _lastRenderedFrame = 0xFFFF;
-    _nextFrameAtMs = 0;
     Serial.printf("Animation ready: %u frames @ %u fps, %lu bytes\n",
                   _animationFrames,
                   _animationFps,
@@ -673,7 +643,8 @@ void MediaManager::cacheFramesInRam() {
                   static_cast<unsigned int>(freePsram),
                   static_cast<unsigned int>(freeHeap));
 
-    if (freePsram < (_animationTotalBytes + 256000) && freeHeap < (_animationTotalBytes + 50000)) {
+    const bool usePsram = psramFound() && freePsram >= (_animationTotalBytes + kPsramHeadroomBytes);
+    if (!usePsram && freeHeap < (_animationTotalBytes + 50000)) {
         Serial.printf("[MEDIA] Animation (%lu bytes) not cached in RAM (insufficient memory), playing from flash\n",
                       static_cast<unsigned long>(_animationTotalBytes));
         return;
@@ -684,6 +655,7 @@ void MediaManager::cacheFramesInRam() {
 
     bool allAllocated = true;
     for (uint16_t i = 0; i < _animationFrames; ++i) {
+        resetTaskWdtIfSubscribed();
         const String path = framePath(i);
         File f = LittleFS.open(path, "r");
         if (!f) {
@@ -692,7 +664,7 @@ void MediaManager::cacheFramesInRam() {
         }
         const size_t size = f.size();
         uint8_t* buf = nullptr;
-        if (psramFound() && freePsram >= (_animationTotalBytes + 128000)) {
+        if (usePsram) {
             buf = static_cast<uint8_t*>(ps_malloc(size));
         }
         if (buf == nullptr) {

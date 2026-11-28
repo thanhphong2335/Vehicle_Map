@@ -47,7 +47,6 @@ private:
 
     WebServer _server{80};
     TaskHandle_t _webTaskHandle = nullptr;
-    mutable SemaphoreHandle_t _netMutex = nullptr;
     static void webTaskThunk(void* parameter);
     void webTaskLoop();
     DisplayManager* _display;
@@ -60,7 +59,6 @@ private:
     AlertManager* _alertManager;
     ImuManager* _imu;
     LedManager* _led = nullptr;
-    File _tileUploadFile;
     NetworkState _networkState = NetworkState::Connecting;
     String _stationSsid;
     String _stationPassword;
@@ -77,6 +75,11 @@ private:
     size_t _testImageUploadLen = 0;
     String _testImageUploadError;
     bool _testImageUploadOk = false;
+    uint8_t* _tileUploadBuf = nullptr;
+    size_t _tileUploadLen = 0;
+    int32_t _tileUploadZ = 0;
+    int32_t _tileUploadX = 0;
+    int32_t _tileUploadY = 0;
     bool _otaInProgress = false;
     bool _otaFsUnmounted = false;
     size_t _otaWrittenBytes = 0;
@@ -86,6 +89,7 @@ private:
     String _lastConnectedSsid;
 
     void freeTestImageUploadBuffer();
+    void freeTileUploadBuffer();
     void remountFsIfNeeded();
 
     void configureRoutes();
